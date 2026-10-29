@@ -22,7 +22,19 @@ interface Partida {
   valor_banco: number;
   diferencia: number;
   descripcion_banco: string;
+  tipo?: 'EXACTA' | 'HOLGURA' | 'VALOR' | 'AGRUPADA_BANCO' | 'AGRUPADA_LIBROS';
+  fecha_banco?: string;
+  ids_banco?: string[];
+  ids_libro?: string[];
 }
+
+const TIPO_CRUCE: Record<string, { corto: string; largo: string; clase: string }> = {
+  EXACTA: { corto: 'Exacta', largo: 'Misma fecha y valor', clase: 'bg-emerald-100 text-emerald-700' },
+  HOLGURA: { corto: 'Holgura', largo: 'Valor igual, fecha dentro de los días de holgura', clase: 'bg-sky-100 text-sky-700' },
+  VALOR: { corto: 'Por valor', largo: 'Mismo valor, registrado en otra fecha del periodo', clase: 'bg-indigo-100 text-indigo-700' },
+  AGRUPADA_BANCO: { corto: 'Agrupada', largo: 'Un comprobante contable = suma de varios movimientos del banco (4x1000, intereses, comisiones…)', clase: 'bg-amber-100 text-amber-800' },
+  AGRUPADA_LIBROS: { corto: 'Agrupada', largo: 'Un movimiento del banco = suma de varios comprobantes contables', clase: 'bg-amber-100 text-amber-800' }
+};
 
 interface Bloque { saldo_inicial: number; neto: number; saldo_final: number; movimientos: number; saldos_consistentes: boolean }
 
@@ -42,6 +54,7 @@ interface Resultado {
   faltan_en_banco: Movimiento[];
   totales: { conciliado: number; pendiente_libros: number; pendiente_banco: number };
   advertencias: string[];
+  por_tipo?: Record<string, number>;
 }
 
 interface Props {
@@ -70,7 +83,8 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
   const [auxiliar, setAuxiliar] = useState<File | null>(null);
   const [extracto, setExtracto] = useState<File | null>(null);
   const [banco, setBanco] = useState('AUTO');
-  const [tolerancia, setTolerancia] = useState('0');
+  const [tolerancia, setTolerancia] = useState('100');
+  const [cruceInteligente, setCruceInteligente] = useState(true);
   const [holgura, setHolgura] = useState('0');
   const [resultado, setResultado] = useState<Resultado | null>(null);
   const [cargando, setCargando] = useState(false);
@@ -115,6 +129,8 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
       fd.append('tolerancia', tolerancia || '0');
       fd.append('dias_holgura', holgura || '0');
       fd.append('banco', banco);
+      fd.append('cruce_por_valor', String(cruceInteligente));
+      fd.append('cruce_agrupado', String(cruceInteligente));
       const r = await apiJson<Resultado & { archivado?: { ok: boolean; error?: string }[] }>(`/api/v1/empresas/${idEmpresa}/conciliacion/ejecutar`, { method: 'POST', body: fd });
       setResultado(r);
       setTieneArchivos({ aux: true, ext: true });
@@ -256,6 +272,9 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
             <span className="text-[10px] font-bold uppercase text-slate-500">Días holgura</span>
             <input type="number" min={0} max={10} value={holgura} onChange={e => setHolgura(e.target.value)} className="mt-1 w-full bg-[#f8f9fa] border border-slate-200 rounded-xl px-3 py-2 text-xs" />
           </label>
+          <label className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-600 pb-2.5 cursor-pointer" title="Además de la misma fecha, cruza partidas con el mismo valor en otra fecha del periodo y comprobantes que agrupan varios movimientos del banco (4x1000, intereses, comisiones + IVA).">
+            <input type="checkbox" checked={cruceInteligente} onChange={e => setCruceInteligente(e.target.checked)} /> Cruce inteligente
+          </label>
           <button onClick={ejecutar} disabled={cargando} className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#271a82] hover:bg-[#1c1343] text-white font-bold text-xs shadow-md cursor-pointer disabled:opacity-60">
             {cargando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4 text-[#fa9d1c]" />} Ejecutar Cruce
           </button>
@@ -308,7 +327,7 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             <div className="bg-white rounded-2xl border border-emerald-200 shadow-xs flex flex-col max-h-[560px]">
               <div className="px-4 py-3 bg-emerald-50 rounded-t-2xl flex items-center justify-between">
-                <div><div className="text-xs font-bold text-emerald-800">1. Partidas conciliadas</div><div className="text-[10px] text-emerald-700">Coincidencia libros = banco</div></div>
+                <div><div className="text-xs font-bold text-emerald-800">1. Partidas conciliadas</div><div className="text-[10px] text-emerald-700">{resultado.por_tipo ? Object.entries(resultado.por_tipo).map(([t, n]) => `${n} ${(TIPO_CRUCE[t]?.corto || t).toLowerCase()}`).join(' · ') : 'Coincidencia libros = banco'}</div></div>
                 <span className="px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[11px] font-black">{resultado.conciliadas.length}</span>
               </div>
               <div className="overflow-y-auto flex-1">
@@ -316,9 +335,12 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
                   <thead className="text-slate-400 uppercase text-[9px] sticky top-0 bg-white"><tr><th className="text-left py-2 px-3">Fecha</th><th className="text-left">Comprobante / Detalle</th><th className="text-right px-3">Valor</th></tr></thead>
                   <tbody className="divide-y divide-slate-100">
                     {resultado.conciliadas.filter(c => coincide(c.fecha, c.comprobante, c.detalle, c.descripcion_banco, c.valor)).map((c, i) => (
-                      <tr key={i} title={`Banco: ${c.descripcion_banco}${c.diferencia ? ` · diferencia ${formatoCOP(c.diferencia)}` : ''}`}>
-                        <td className="py-1.5 px-3 pr-2 font-mono text-emerald-700 whitespace-nowrap">{c.fecha}</td>
-                        <td className="py-1.5 truncate max-w-[160px]"><span className="font-mono text-[10px] bg-slate-100 rounded px-1 mr-1">{c.comprobante || '—'}</span>{c.detalle}</td>
+                      <tr key={i} title={`Banco${c.fecha_banco ? ` (${c.fecha_banco})` : ''}: ${c.descripcion_banco}${c.diferencia ? ` · diferencia ${formatoCOP(c.diferencia)}` : ''}${c.tipo ? `\n${TIPO_CRUCE[c.tipo]?.largo || ''}` : ''}`}>
+                        <td className="py-1.5 px-3 pr-2 font-mono text-emerald-700 whitespace-nowrap">{c.fecha}{c.fecha_banco && c.fecha_banco !== c.fecha && <div className="text-[9px] text-slate-400">banco {c.fecha_banco}</div>}</td>
+                        <td className="py-1.5 truncate max-w-[160px]">
+                          {c.tipo && c.tipo !== 'EXACTA' && <span className={`text-[9px] font-bold rounded px-1 mr-1 ${TIPO_CRUCE[c.tipo]?.clase}`}>{TIPO_CRUCE[c.tipo]?.corto}{(c.ids_banco?.length || 1) > 1 ? ` ×${c.ids_banco!.length}` : (c.ids_libro?.length || 1) > 1 ? ` ×${c.ids_libro!.length}` : ''}</span>}
+                          <span className="font-mono text-[10px] bg-slate-100 rounded px-1 mr-1">{c.comprobante || '—'}</span>{c.detalle}
+                        </td>
                         <td className={`py-1.5 px-3 text-right font-semibold whitespace-nowrap ${valorCls(c.valor)}`}>{formatoCOP(c.valor)}</td>
                       </tr>
                     ))}

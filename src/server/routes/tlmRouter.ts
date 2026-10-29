@@ -563,7 +563,11 @@ router.post(
 
     const tolerancia = Math.max(0, Number(req.body?.tolerancia) || 0);
     const dias = Math.max(0, Math.min(10, Number(req.body?.dias_holgura) || 0));
-    const resultado = conciliar(e.id_empresa, estado.libros, estado.extracto, tolerancia, dias);
+    const activo = (v: unknown) => !['false', '0', 'no'].includes(String(v ?? 'true').toLowerCase());
+    const resultado = conciliar(e.id_empresa, estado.libros, estado.extracto, tolerancia, dias, {
+      cruce_por_valor: activo(req.body?.cruce_por_valor),
+      cruce_agrupado: activo(req.body?.cruce_agrupado)
+    });
     resultado.archivo_auxiliar = (estado.libros as any).archivo;
     resultado.archivo_extracto = (estado.extracto as any).archivo;
     if (req.body?.banco && req.body.banco !== 'AUTO') resultado.banco = String(req.body.banco);

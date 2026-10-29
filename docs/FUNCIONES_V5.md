@@ -59,3 +59,24 @@ Esta versión toma las funciones de https://consola-tlm-cloud.onrender.com/ y la
 - **Ver soporte PDF** muestra el PDF original. El botón del ojo aparece relleno cuando la factura tiene original. Si el paquete no traía PDF, se muestra la representación generada desde el XML con la etiqueta "Representación generada desde el XML".
 - **Exportar → Soportes PDF (ZIP)** incluye los PDF originales. Los que se generan desde el XML llevan el sufijo `_REPRESENTACION_XML`.
 - Las facturas que se cargaron antes de este cambio no tienen PDF guardado. Para guardarlo, basta volver a cargar el mismo .zip: las facturas se reconocen como duplicadas y no se repiten, pero el PDF sí queda guardado.
+
+## Conciliación bancaria: lectura multibanco y cruce inteligente
+
+- **Auxiliar de Siigo.** Se corrige el error "No se encontró el encabezado del auxiliar". El "Movimiento auxiliar por cuenta contable" de Siigo declara mal el tamaño de la hoja (A1:A31), y por eso solo se leía la primera columna; ahora el rango se recalcula con las celdas reales.
+  - El saldo inicial y el final se toman de la fila "Cuenta contable:" (columnas Saldo inicial y Saldo total cuenta).
+  - Si el archivo trae varias hojas, se busca el auxiliar en todas.
+  - Si se carga un reporte de conciliación en lugar del auxiliar, el mensaje lo dice.
+- **Extractos PDF de varios bancos.** El lector reconoce:
+  - Fechas `1/06`, `01/06/2026`, `2026/06/01`, `01-06`, `01 JUN`, `JUN 01` y día y mes en columnas separadas (`01 06`, como en Davivienda).
+  - El valor antes de la descripción (Davivienda) o al final de la línea, y las columnas Cargo / Abono / Saldo (BBVA).
+  - Las marcas `CR` / `DB` y `+` / `-`, y los extractos ordenados del más reciente al más antiguo.
+  - Cuando el banco no imprime el signo, lo corrige con el saldo corrido.
+  - El saldo anterior y el actual se toman de la cifra que sigue a cada etiqueta, aunque en la misma línea aparezca "Saldo promedio".
+  - El banco se detecta por el encabezado del extracto, no por los movimientos (un "PAGO PSE Banco Davivienda" en un extracto de Bancolombia ya no lo confunde). Se agregaron Global66, Banco Agrario, Bancoomeva, Falabella, Pichincha, Serfinanza, GNB Sudameris, Lulo y Confiar.
+- **Cruce inteligente** (activo por defecto; la tolerancia por defecto es $100, como en Consola TLM Cloud). El cruce se hace en este orden:
+  1. Misma fecha y valor.
+  2. Valor igual dentro de los días de holgura.
+  3. Mismo valor exacto en otra fecha del periodo, por ejemplo un pago contabilizado semanas después.
+  4. **Agrupada:** un comprobante contable igual a la suma de varios movimientos del banco. Es el caso de los cierres de Siigo que registran en un solo CC el total del 4×1000, de los intereses o de las comisiones con IVA.
+  5. **Agrupada:** un movimiento del banco igual a varios comprobantes de fechas cercanas.
+- Cada partida conciliada muestra el tipo de cruce y la fecha del banco. El reporte Excel incluye las columnas "Tipo de cruce", "Fecha banco" y la cantidad de movimientos de cada lado.

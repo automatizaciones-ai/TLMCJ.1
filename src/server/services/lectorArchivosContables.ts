@@ -103,6 +103,15 @@ const normalizarTexto = (s: unknown) =>
 // ==========================================
 // Hojas de cálculo → filas
 // ==========================================
+/** Todas las hojas del libro (o la única "hoja" de un CSV), de la más larga a la más corta */
+export function leerHojas(buffer: Buffer, nombreArchivo: string): unknown[][][] {
+  const lower = nombreArchivo.toLowerCase();
+  if (lower.endsWith('.csv') || lower.endsWith('.txt')) return [leerFilas(buffer, nombreArchivo)];
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+  return wb.SheetNames.map(n => { corregirRango(wb.Sheets[n]); return XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[n], { header: 1, raw: true, defval: '' }); })
+    .sort((a, b) => b.length - a.length);
+}
+
 export function leerFilas(buffer: Buffer, nombreArchivo: string): unknown[][] {
   const lower = nombreArchivo.toLowerCase();
   if (lower.endsWith('.csv') || lower.endsWith('.txt')) {
@@ -116,10 +125,28 @@ export function leerFilas(buffer: Buffer, nombreArchivo: string): unknown[][] {
   // Se toma la hoja con más filas útiles
   let mejor: unknown[][] = [];
   for (const nombre of wb.SheetNames) {
-    const filas = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[nombre], { header: 1, raw: true, defval: '' });
+    const hoja = wb.Sheets[nombre];
+    corregirRango(hoja);
+    const filas = XLSX.utils.sheet_to_json<unknown[]>(hoja, { header: 1, raw: true, defval: '' });
     if (filas.length > mejor.length) mejor = filas;
   }
   return mejor;
+}
+
+/**
+ * Siigo y otros ERP exportan hojas con la dimensión mal declarada (p. ej. A1:A31 aunque haya 16 columnas),
+ * lo que hace que solo se lea la primera columna. Se recalcula el rango real a partir de las celdas.
+ */
+function corregirRango(hoja: XLSX.WorkSheet) {
+  let maxF = -1, maxC = -1, minF = Infinity, minC = Infinity;
+  for (const clave of Object.keys(hoja)) {
+    if (clave.startsWith('!')) continue;
+    const { r, c } = XLSX.utils.decode_cell(clave);
+    if (r > maxF) maxF = r; if (c > maxC) maxC = c;
+    if (r < minF) minF = r; if (c < minC) minC = c;
+  }
+  if (maxF < 0) return;
+  hoja['!ref'] = XLSX.utils.encode_range({ s: { r: Math.min(minF, 0), c: Math.min(minC, 0) }, e: { r: maxF, c: maxC } });
 }
 
 interface MapaColumnas { [campo: string]: number }
@@ -162,36 +189,55 @@ function calcularResumen(movs: MovimientoNormalizado[], saldoInicial: number | n
 // ==========================================
 // Auxiliar contable (libros)
 // ==========================================
+const REGLAS_AUXILIAR: Record<string, RegExp> = {
+  fecha: /^fecha( de)?( elaboracion| documento| movimiento)?$|^fecha/,
+  comprobante: /comprobante|documento|^doc|tipo y numero|^numero/,
+  consecutivo: /consecutivo/,
+  descripcion: /descripcion|detalle|concepto|observacion/,
+  tercero: /nombre( del)? tercero|^tercero|razon social|^nombre/,
+  nit: /identificacion|nit|cedula/,
+  debito: /^debito|^debitos|^debe|^valor debito/,
+  credito: /^credito|^creditos|^haber|^valor credito/,
+  saldo: /^saldo( final)?$|saldo movimiento|^nuevo saldo/,
+  saldo_inicial_col: /^saldo inicial|^saldo anterior/,
+  saldo_total_col: /saldo total|^saldo final cuenta|^total cuenta/
+};
+
 export function leerAuxiliar(buffer: Buffer, nombreArchivo: string): LecturaMovimientos {
-  const filas = leerFilas(buffer, nombreArchivo);
   const advertencias: string[] = [];
-  const enc = detectarEncabezado(
-    filas,
-    {
-      fecha: /^fecha( de)?( elaboracion| documento| movimiento)?$|^fecha/,
-      comprobante: /comprobante|documento|^doc|tipo y numero|^numero/,
-      consecutivo: /consecutivo/,
-      descripcion: /descripcion|detalle|concepto|observacion/,
-      tercero: /nombre( del)? tercero|^tercero|razon social|^nombre/,
-      nit: /identificacion|nit|cedula/,
-      debito: /^debito|^debitos|^debe|^valor debito/,
-      credito: /^credito|^creditos|^haber|^valor credito/,
-      saldo: /^saldo( final)?$|saldo movimiento|^nuevo saldo/
-    },
-    ['fecha', 'debito', 'credito']
-  );
-  if (!enc) throw new Error('No se encontró el encabezado del auxiliar (se esperan columnas Fecha, Débito y Crédito).');
+  let filas: unknown[][] = [];
+  let enc: { fila: number; mapa: MapaColumnas } | null = null;
+  const hojas = leerHojas(buffer, nombreArchivo);
+  for (const h of hojas) {
+    enc = detectarEncabezado(h, REGLAS_AUXILIAR, ['fecha', 'debito', 'credito']);
+    if (enc) { filas = h; break; }
+  }
+  if (!enc) {
+    const texto = normalizarTexto(hojas.flat(2).slice(0, 400).join(' '));
+    if (/conciliacion|faltan en (libros|banco)|partidas conciliadas/.test(texto)) {
+      throw new Error('Este archivo es un reporte de conciliación, no el auxiliar contable. Cargue el "Movimiento auxiliar por cuenta contable" exportado de Siigo (columnas Fecha, Débito y Crédito).');
+    }
+    throw new Error('No se encontró el encabezado del auxiliar (se esperan columnas Fecha, Débito y Crédito). Exporte desde Siigo el "Movimiento auxiliar por cuenta contable" en Excel.');
+  }
 
   const { fila, mapa } = enc;
   const movs: MovimientoNormalizado[] = [];
   let saldoInicial: number | null = null;
   let saldoFinal: number | null = null;
+  let cuentasResumen = 0;
 
   for (let i = fila + 1; i < filas.length; i++) {
     const r = filas[i] || [];
     const textoFila = normalizarTexto(r.join(' '));
     const fecha = parsearFecha(r[mapa.fecha]);
     if (!fecha) {
+      // Fila resumen de cuenta de Siigo ("Cuenta contable: 11200503 ...") con columnas Saldo inicial / Saldo total cuenta
+      if (/cuenta contable:|^total/.test(textoFila) && (mapa.saldo_inicial_col !== undefined || mapa.saldo_total_col !== undefined)) {
+        if (/cuenta contable:/.test(textoFila)) cuentasResumen++;
+        if (saldoInicial === null && mapa.saldo_inicial_col !== undefined && String(r[mapa.saldo_inicial_col] ?? '').trim() !== '') saldoInicial = parsearMonto(r[mapa.saldo_inicial_col]);
+        if (saldoFinal === null && mapa.saldo_total_col !== undefined && String(r[mapa.saldo_total_col] ?? '').trim() !== '') saldoFinal = parsearMonto(r[mapa.saldo_total_col]);
+        continue;
+      }
       if (/saldo (inicial|anterior)/.test(textoFila) && saldoInicial === null) {
         const numeros = r.map(parsearMonto).filter(n => n !== 0);
         saldoInicial = mapa.saldo !== undefined && parsearMonto(r[mapa.saldo]) !== 0 ? parsearMonto(r[mapa.saldo]) : (numeros.at(-1) ?? 0);
@@ -216,6 +262,7 @@ export function leerAuxiliar(buffer: Buffer, nombreArchivo: string): LecturaMovi
     });
   }
   if (movs.length === 0) advertencias.push('El auxiliar no tiene movimientos con fecha.');
+  if (cuentasResumen > 1) advertencias.push(`El auxiliar trae ${cuentasResumen} cuentas contables; exporte solo la cuenta del banco que va a conciliar.`);
   return calcularResumen(movs, saldoInicial, saldoFinal, advertencias);
 }
 
@@ -223,6 +270,7 @@ export function leerAuxiliar(buffer: Buffer, nombreArchivo: string): LecturaMovi
 // Extracto bancario
 // ==========================================
 const BANCOS: [RegExp, string][] = [
+  [/global ?66/i, 'GLOBAL66'],
   [/davivienda|daviplata/i, 'DAVIVIENDA'],
   [/bancolombia/i, 'BANCOLOMBIA'],
   [/bbva/i, 'BBVA'],
@@ -233,11 +281,29 @@ const BANCOS: [RegExp, string][] = [
   [/colpatria|scotiabank/i, 'SCOTIABANK COLPATRIA'],
   [/caja social/i, 'BANCO CAJA SOCIAL'],
   [/itau|itaú/i, 'ITAÚ'],
-  [/nequi/i, 'NEQUI']
+  [/nequi/i, 'NEQUI'],
+  [/banco agrario|bancoagrario/i, 'BANCO AGRARIO'],
+  [/bancoomeva/i, 'BANCOOMEVA'],
+  [/falabella/i, 'BANCO FALABELLA'],
+  [/pichincha/i, 'BANCO PICHINCHA'],
+  [/serfinanza/i, 'BANCO SERFINANZA'],
+  [/gnb sudameris|sudameris/i, 'GNB SUDAMERIS'],
+  [/lulo bank/i, 'LULO BANK'],
+  [/confiar/i, 'CONFIAR'],
+  [/coltefinanciera/i, 'COLTEFINANCIERA']
 ];
 
+/**
+ * Banco del extracto: el que aparece primero en el encabezado del documento.
+ * (Los movimientos suelen nombrar otros bancos, p. ej. "PAGO PSE Banco Davivienda" en un extracto de Bancolombia.)
+ */
 export function detectarBanco(texto: string): string | undefined {
-  return BANCOS.find(([re]) => re.test(texto))?.[1];
+  let mejor: { pos: number; banco: string } | null = null;
+  for (const [re, banco] of BANCOS) {
+    const m = re.exec(texto);
+    if (m && (mejor === null || m.index < mejor.pos)) mejor = { pos: m.index, banco };
+  }
+  return mejor?.banco;
 }
 
 const PALABRAS_SALIDA = /retiro|pago|cargo|debito|descuento|gravamen|4x1000|gmf|comision|compra|cobro|cuota|transferencia enviada|traslado a|nota debito|iva |impuesto|cheque pagado/;
@@ -344,64 +410,170 @@ export async function textoLineasPdf(buffer: Buffer): Promise<string[]> {
   return lineas;
 }
 
+/** Monto que aparece justo después de una etiqueta (las líneas de resumen de los extractos traen dos columnas: "SALDO ANTERIOR $ X   SALDO PROMEDIO $ Y") */
+function montoTrasEtiqueta(linea: string, etiqueta: RegExp): number | null {
+  const m = linea.match(etiqueta);
+  if (!m || m.index === undefined) return null;
+  const resto = linea.substring(m.index + m[0].length);
+  const monto = resto.match(/^[\s:$]*(-?\s?\$?\s?-?[\d.,]*\d-?)/);
+  return monto ? parsearMonto(monto[1]) : null;
+}
+
 const RE_MONTO = /-?\$?\s?-?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?-?|-?\$?\s?\d+(?:[.,]\d{1,2})?-?/g;
+
+const MESES_RE = '(?:ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic|jan|apr|aug|dec)[a-z.]*';
+/** Fecha al inicio de la línea en los formatos que usan los bancos colombianos */
+const RE_FECHA_LINEA = new RegExp(
+  '^\\s*(' +
+    '\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}' +                    // 2026/06/01
+    '|\\d{1,2}[-/.]\\d{1,2}(?:[-/.]\\d{2,4})?' +             // 01/06/2026 · 1/06 · 01-06
+    `|\\d{1,2}[-\\s/]${MESES_RE}(?:[-\\s/]\\d{2,4})?` +       // 01 JUN 2026 · 01-JUN
+    `|${MESES_RE}\\s+\\d{1,2}(?:\\s+\\d{2,4})?` +              // JUN 01
+    '|\\d{2}\\s\\d{2}(?=\\s+[$A-Za-zÁÉÍÓÚÑáéíóúñ])' +           // 01 06 DESCRIPCIÓN (Davivienda: día y mes en columnas)
+  ')\\b',
+  'i'
+);
+
+function fechaPdf(texto: string, anio?: number, hasta?: { anio: number; mes: number }): string {
+  let t = texto.trim().toLowerCase().replace(/\s+/g, ' ');
+  const mesAntes = t.match(new RegExp(`^(${MESES_RE})\\s+(\\d{1,2})(?:\\s+(\\d{2,4}))?$`));
+  if (mesAntes) t = `${mesAntes[2]} ${mesAntes[1]}${mesAntes[3] ? ' ' + mesAntes[3] : ''}`;
+  const dosNumeros = t.match(/^(\d{2}) (\d{2})$/);
+  if (dosNumeros) t = `${dosNumeros[1]}/${dosNumeros[2]}`;
+  let iso = parsearFecha(t, anio);
+  // Extractos que cruzan de año (diciembre → enero): el mes posterior al de corte pertenece al año anterior
+  if (iso && hasta && !/\d{4}/.test(t) && !/\d{1,2}[-/.]\d{1,2}[-/.]\d{2}$/.test(t)) {
+    const mes = Number(iso.substring(5, 7));
+    iso = `${mes > hasta.mes ? hasta.anio - 1 : hasta.anio}${iso.substring(4)}`;
+  }
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || m < 1 || m > 12 || d < 1 || d > 31) return '';
+  return iso;
+}
+
+const RE_TOKEN_MONTO = /^\(?-?\s?\$?\s?-?[\d.,]*\d\)?-?$/;
+
+/** Separa los montos al final de la línea; reconoce marcas de naturaleza CR / DB y "$" sueltos. */
+function montosFinales(tokens: string[]): { montos: number[]; marca?: 1 | -1 } {
+  const montos: number[] = [];
+  let marca: 1 | -1 | undefined;
+  while (tokens.length) {
+    let t = tokens[tokens.length - 1].replace(/\s+/g, ' ').trim();
+    if (t === '$') { tokens.pop(); continue; }
+    const conMarca = t.match(/^(.*?)\s*(CR|DB|DR|C|D|\+)$/);
+    if (conMarca && RE_TOKEN_MONTO.test(conMarca[1].replace(/\s/g, '')) && /[.,]/.test(conMarca[1])) {
+      if (montos.length === 0 || marca === undefined) marca = /^(CR|C|\+)$/.test(conMarca[2]) ? 1 : -1;
+      t = conMarca[1];
+    } else if (/^(CR|DB|DR)$/.test(t) && montos.length === 0) {
+      marca = t === 'CR' ? 1 : -1;
+      tokens.pop();
+      continue;
+    }
+    const limpio = t.replace(/\s/g, '');
+    if (!(RE_TOKEN_MONTO.test(limpio) && /[.,]/.test(limpio))) break;
+    montos.unshift(parsearMonto(limpio.replace(/^\((.*)\)$/, '-$1')));
+    tokens.pop();
+  }
+  return { montos, marca };
+}
+
+/** Corrige el signo de cada movimiento con el saldo corrido (sirve para bancos que no imprimen el signo) */
+function corregirSignosConSaldo(movs: MovimientoNormalizado[], saldoInicial: number | null) {
+  let anterior = saldoInicial;
+  for (const m of movs) {
+    if (anterior !== null && m.saldo !== undefined) {
+      const abs = Math.abs(m.valor);
+      if (Math.abs(anterior + m.valor - m.saldo) > 1) {
+        if (Math.abs(anterior + abs - m.saldo) <= 1) m.valor = abs;
+        else if (Math.abs(anterior - abs - m.saldo) <= 1) m.valor = -abs;
+      }
+    }
+    anterior = m.saldo ?? (anterior !== null ? anterior + m.valor : null);
+  }
+}
 
 export async function leerExtractoPdf(buffer: Buffer, nombreArchivo: string): Promise<LecturaMovimientos> {
   const lineas = await textoLineasPdf(buffer);
   const textoCompleto = lineas.join('\n');
   const advertencias: string[] = [];
   const anio = Number((textoCompleto.match(/(?:periodo|desde|hasta|fecha de corte|corte)[^\n]*?(20\d{2})/i) || textoCompleto.match(/\b(20\d{2})\b/) || [])[1]) || undefined;
+  const mHasta = textoCompleto.match(/(?:hasta|fecha de corte|corte|al)\s*:?\s*(20\d{2})[-/.](\d{1,2})[-/.]\d{1,2}|(?:hasta|fecha de corte|corte|al)\s*:?\s*\d{1,2}[-/.](\d{1,2})[-/.](20\d{2})/i);
+  const hasta = mHasta ? (mHasta[1] ? { anio: +mHasta[1], mes: +mHasta[2] } : { anio: +mHasta[4], mes: +mHasta[3] }) : undefined;
 
   let saldoInicial: number | null = null;
   let saldoFinal: number | null = null;
-  const movs: MovimientoNormalizado[] = [];
+  let movs: MovimientoNormalizado[] = [];
 
   for (const linea of lineas) {
     const norm = normalizarTexto(linea);
     if (saldoInicial === null && /saldo (anterior|inicial)/.test(norm)) {
-      const montos = linea.match(RE_MONTO)?.map(parsearMonto).filter(n => Math.abs(n) >= 1);
-      if (montos?.length) saldoInicial = montos.at(-1)!;
-      continue;
+      const v = montoTrasEtiqueta(linea, /saldo\s+(anterior|inicial)/i);
+      if (v !== null) { saldoInicial = v; continue; }
     }
-    if (/saldo (actual|final|nuevo)|nuevo saldo/.test(norm)) {
-      const montos = linea.match(RE_MONTO)?.map(parsearMonto).filter(n => Math.abs(n) >= 1);
-      if (montos?.length) saldoFinal = montos.at(-1)!;
-      continue;
+    if (saldoFinal === null && /saldo (actual|final|nuevo)|nuevo saldo/.test(norm)) {
+      const v = montoTrasEtiqueta(linea, /saldo\s+(actual|final|nuevo)|nuevo\s+saldo/i);
+      if (v !== null) { saldoFinal = v; continue; }
     }
-    const mFecha = linea.match(/^\s*(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?|\d{1,2}\s+[A-Za-zé]{3}(?:\s+\d{2,4})?)\b/);
+    const mFecha = linea.match(RE_FECHA_LINEA);
     if (!mFecha) continue;
-    const fecha = parsearFecha(mFecha[1], anio);
+    const fecha = fechaPdf(mFecha[1], anio, hasta);
     if (!fecha) continue;
     const resto = linea.substring(mFecha[0].length);
-    // Montos al final de la línea (los que tienen separador de miles o decimales)
     const tokens = resto.split(/\s{2,}/).map(t => t.trim()).filter(Boolean);
-    const montos: number[] = [];
-    while (tokens.length && /^-?\$?\s?-?[\d.,]+-?$/.test(tokens[tokens.length - 1]) && /[.,]/.test(tokens[tokens.length - 1])) {
-      montos.unshift(parsearMonto(tokens.pop()!));
+    // Fechas adicionales (fecha valor / fecha operación) al inicio se descartan
+    while (tokens.length && RE_FECHA_LINEA.test(tokens[0]) && fechaPdf(tokens[0].match(RE_FECHA_LINEA)![1], anio, hasta) && tokens[0].replace(RE_FECHA_LINEA, '').trim() === '') tokens.shift();
+    let { montos, marca } = montosFinales(tokens);
+    if (montos.length === 0) {
+      // Formato "fecha · valor · documento · descripción" (Davivienda y otros): el valor va antes del texto
+      const i = tokens.findIndex(t => /\$|\d[.,]\d{2}[+-]?$/.test(t) && RE_TOKEN_MONTO.test(t.replace(/\s|[+]$|CR$|DB$/g, '').replace(/^\$/, '')));
+      if (i < 0) continue;
+      const crudo = tokens[i].replace(/\s/g, '');
+      const v = parsearMonto(crudo.replace(/(CR|DB|\+)$/, ''));
+      marca = /(\+|CR)$/.test(crudo) ? 1 : /(-|DB)$/.test(crudo) ? -1 : undefined;
+      montos = [Math.abs(v) * (v < 0 ? -1 : 1)];
+      tokens.splice(i, 1);
     }
-    if (montos.length === 0) continue;
-    const descripcion = tokens.join(' ').trim();
+    const descripcion = tokens.filter(t => !/^\d{1,6}$/.test(t)).join(' ').trim();
+    if (!descripcion || /^saldo/i.test(descripcion)) continue;
     let valor = 0;
     let saldo: number | undefined;
     if (montos.length >= 3) {
       // Débito, Crédito, Saldo
-      const [a, b, c] = montos.slice(-3);
-      valor = Math.abs(b) - Math.abs(a);
-      saldo = c;
+      const [d, c, sal] = montos.slice(-3);
+      valor = Math.abs(c) - Math.abs(d);
+      saldo = sal;
     } else if (montos.length === 2) {
       valor = montos[0];
       saldo = montos[1];
     } else {
       valor = montos[0];
     }
+    if (marca !== undefined) valor = Math.abs(valor) * marca;
     if (valor === 0) continue;
     movs.push({ id: `PDF-${movs.length + 1}`, fecha, descripcion, valor, saldo });
   }
 
+  // Extractos ordenados del más reciente al más antiguo
+  if (movs.length > 1 && movs[0].fecha > movs[movs.length - 1].fecha) {
+    movs = movs.reverse().map((m, i) => ({ ...m, id: `PDF-${i + 1}` }));
+  }
+
   if (movs.length === 0) {
-    advertencias.push('No se reconocieron movimientos en el PDF. Si es un PDF escaneado, conviértalo a Excel o descargue el extracto en formato Excel/CSV desde el banco.');
-  } else if (movs.every(m => m.valor > 0)) {
-    inferirSignos(movs, saldoInicial);
+    advertencias.push('No se reconocieron movimientos en el PDF. Si es un PDF escaneado (imagen), descargue el extracto en Excel/CSV desde la banca en línea o conviértalo con OCR.');
+  } else {
+    if (saldoInicial === null) {
+      const primero = movs.find(m => m.saldo !== undefined);
+      if (primero) {
+        const idx = movs.indexOf(primero);
+        const antes = movs.slice(0, idx).reduce((s, m) => s + m.valor, 0);
+        // Saldo inicial deducido del primer saldo impreso (se prueban ambos signos del primer movimiento)
+        const candidato = primero.saldo! - primero.valor - antes;
+        const alterno = primero.saldo! + primero.valor - antes;
+        saldoInicial = movs.every(m => m.valor > 0) ? Math.min(candidato, alterno) : candidato;
+      }
+    }
+    if (movs.some(m => m.saldo !== undefined)) corregirSignosConSaldo(movs, saldoInicial);
+    else if (movs.every(m => m.valor > 0)) inferirSignos(movs, saldoInicial);
   }
   const resultado = calcularResumen(movs, saldoInicial, saldoFinal, advertencias);
   resultado.banco_detectado = detectarBanco(textoCompleto.substring(0, 3000) + ' ' + nombreArchivo);

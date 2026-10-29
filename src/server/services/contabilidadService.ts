@@ -314,6 +314,16 @@ export function planoSiigo(comprobantes: Comprobante[], opciones: OpcionesPlano,
 // ==========================================
 // 3. Conciliación bancaria
 // ==========================================
+export type TipoCruce = 'EXACTA' | 'HOLGURA' | 'VALOR' | 'AGRUPADA_BANCO' | 'AGRUPADA_LIBROS';
+
+export const ETIQUETA_CRUCE: Record<TipoCruce, string> = {
+  EXACTA: 'Misma fecha y valor',
+  HOLGURA: 'Valor igual, fecha dentro de la holgura',
+  VALOR: 'Mismo valor, distinta fecha en el periodo',
+  AGRUPADA_BANCO: 'Un registro contable = varios movimientos del banco',
+  AGRUPADA_LIBROS: 'Un movimiento del banco = varios registros contables'
+};
+
 export interface PartidaConciliada {
   fecha: string;
   comprobante?: string;
@@ -322,8 +332,14 @@ export interface PartidaConciliada {
   valor_banco: number;
   diferencia: number;
   descripcion_banco: string;
+  /** Primer movimiento de cada lado (compatibilidad); los cruces agrupados traen todos en ids_* */
   id_libro: string;
   id_banco: string;
+  tipo: TipoCruce;
+  ids_libro: string[];
+  ids_banco: string[];
+  fecha_banco: string;
+  dias_diferencia: number;
 }
 
 export interface ResultadoConciliacion {
@@ -342,25 +358,97 @@ export interface ResultadoConciliacion {
   faltan_en_libros: MovimientoNormalizado[];
   faltan_en_banco: MovimientoNormalizado[];
   totales: { conciliado: number; pendiente_libros: number; pendiente_banco: number };
+  /** Partidas conciliadas por tipo de cruce */
+  por_tipo: Partial<Record<TipoCruce, number>>;
   advertencias: string[];
 }
 
 const diasEntre = (a: string, b: string) => Math.abs(Date.parse(a) - Date.parse(b)) / 86400000;
+
+const sinTildes = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+
+/**
+ * Familias de cargos y abonos bancarios que los contadores suelen registrar en un solo comprobante al cierre del mes
+ * (Siigo: "CC-xx" con el total de 4x1000, de intereses o de comisiones + IVA). Válido para extractos de cualquier banco.
+ */
+const FAMILIAS_BANCARIAS: [string, RegExp][] = [
+  ['GMF 4x1000', /4\s*X\s*1000|GMF|GRAVAMEN|IMPTO GOBIERNO|IMPUESTO GOBIERNO|IMP\.? ?GOB/],
+  ['Intereses / rendimientos', /INTERES|RENDIMIENTO|ABONO INT/],
+  ['Comisiones, servicios e IVA', /COMIS|SERVICIO|CUOTA (DE )?MANEJO|IVA|COBRO|CARGO|COSTO TRANSAC|TARIFA|PORTES|CHEQUERA|SWIFT/],
+  ['Retenciones', /RETEFUENTE|RETENCION|RTE ?FTE|RETE ?ICA|RETE ?IVA/]
+];
+const familiaDe = (m: MovimientoNormalizado) => FAMILIAS_BANCARIAS.find(([, re]) => re.test(sinTildes(m.descripcion)))?.[0];
+
+/** Busca un subconjunto (máx. 18 elementos candidatos) cuya suma sea `objetivo` ± tolerancia. */
+function subconjuntoQueSuma(candidatos: MovimientoNormalizado[], objetivo: number, tolerancia: number): MovimientoNormalizado[] | null {
+  const lista = candidatos.slice(0, 18);
+  const n = lista.length;
+  if (n < 2) return null;
+  // Primero el grupo completo (lo más común: el total del mes)
+  const total = lista.reduce((s, m) => s + m.valor, 0);
+  if (Math.abs(total - objetivo) <= tolerancia) return lista;
+  let mejor: { mask: number; dif: number; cuenta: number } | null = null;
+  for (let mask = 1; mask < (1 << n); mask++) {
+    const cuenta = (mask.toString(2).match(/1/g) || []).length;
+    if (cuenta < 2) continue;
+    let suma = 0;
+    for (let i = 0; i < n; i++) if (mask & (1 << i)) suma += lista[i].valor;
+    const dif = Math.abs(suma - objetivo);
+    if (dif <= tolerancia && (!mejor || dif < mejor.dif || (dif === mejor.dif && cuenta > mejor.cuenta))) mejor = { mask, dif, cuenta };
+  }
+  return mejor ? lista.filter((_, i) => mejor!.mask & (1 << i)) : null;
+}
 
 export function conciliar(
   idEmpresa: number,
   libros: LecturaMovimientos,
   extracto: LecturaMovimientos,
   tolerancia = 0,
-  diasHolgura = 0
+  diasHolgura = 0,
+  opciones: { cruce_por_valor?: boolean; cruce_agrupado?: boolean } = {}
 ): ResultadoConciliacion {
+  const { cruce_por_valor = true, cruce_agrupado = true } = opciones;
   const usadosLibro = new Set<string>();
   const usadosBanco = new Set<string>();
   const conciliadas: PartidaConciliada[] = [];
+  const tolGrupo = Math.max(tolerancia, 1);
 
-  // Pasada 1: misma fecha. Pasada 2 (opcional): ± días de holgura. En cada pasada se toma la menor diferencia.
-  const pasadas = diasHolgura > 0 ? [0, diasHolgura] : [0];
-  for (const holgura of pasadas) {
+  const registrar = (tipo: TipoCruce, ls: MovimientoNormalizado[], bs: MovimientoNormalizado[]) => {
+    ls.forEach(l => usadosLibro.add(l.id));
+    bs.forEach(b => usadosBanco.add(b.id));
+    const valorL = r2(ls.reduce((s, m) => s + m.valor, 0));
+    const valorB = r2(bs.reduce((s, m) => s + m.valor, 0));
+    const l0 = ls[0];
+    const b0 = bs[0];
+    const descBanco = bs.length > 1
+      ? `${bs.length} movimientos: ${[...new Set(bs.map(b => b.descripcion))].slice(0, 3).join(' · ')}${new Set(bs.map(b => b.descripcion)).size > 3 ? '…' : ''}`
+      : b0.descripcion;
+    const detalle = ls.length > 1
+      ? `${ls.length} registros: ${ls.map(l => l.comprobante || l.tercero || l.descripcion).slice(0, 4).join(', ')}${ls.length > 4 ? '…' : ''}`
+      : (l0.tercero || l0.descripcion);
+    conciliadas.push({
+      fecha: l0.fecha,
+      comprobante: ls.length > 1 ? ls.map(l => l.comprobante).filter(Boolean).slice(0, 3).join(', ') || undefined : l0.comprobante,
+      detalle,
+      valor: valorL,
+      valor_banco: valorB,
+      diferencia: r2(valorL - valorB),
+      descripcion_banco: descBanco,
+      id_libro: l0.id,
+      id_banco: b0.id,
+      tipo,
+      ids_libro: ls.map(l => l.id),
+      ids_banco: bs.map(b => b.id),
+      fecha_banco: b0.fecha,
+      dias_diferencia: Math.round(diasEntre(l0.fecha, b0.fecha))
+    });
+  };
+
+  // Pasadas 1-3 (uno a uno): misma fecha → dentro de la holgura → mismo valor en cualquier fecha del periodo.
+  const pasadas: [TipoCruce, number][] = [['EXACTA', 0]];
+  if (diasHolgura > 0) pasadas.push(['HOLGURA', diasHolgura]);
+  if (cruce_por_valor) pasadas.push(['VALOR', Infinity]);
+  for (const [tipo, holgura] of pasadas) {
     for (const b of extracto.movimientos) {
       if (usadosBanco.has(b.id)) continue;
       let mejor: { l: MovimientoNormalizado; dif: number; dias: number } | null = null;
@@ -369,25 +457,55 @@ export function conciliar(
         if (Math.sign(l.valor) !== Math.sign(b.valor)) continue;
         const dias = diasEntre(l.fecha, b.fecha);
         if (dias > holgura) continue;
+        // En el cruce por valor solo se acepta coincidencia exacta (la tolerancia aplica a fechas cercanas)
         const dif = Math.abs(l.valor - b.valor);
-        if (dif > tolerancia) continue;
+        if (dif > (tipo === 'VALOR' ? 0.01 : tolerancia)) continue;
         if (!mejor || dif < mejor.dif || (dif === mejor.dif && dias < mejor.dias)) mejor = { l, dif, dias };
       }
-      if (mejor) {
-        usadosBanco.add(b.id);
-        usadosLibro.add(mejor.l.id);
-        conciliadas.push({
-          fecha: mejor.l.fecha,
-          comprobante: mejor.l.comprobante,
-          detalle: mejor.l.tercero || mejor.l.descripcion,
-          valor: mejor.l.valor,
-          valor_banco: b.valor,
-          diferencia: r2(mejor.l.valor - b.valor),
-          descripcion_banco: b.descripcion,
-          id_libro: mejor.l.id,
-          id_banco: b.id
-        });
+      if (mejor) registrar(tipo, [mejor.l], [b]);
+    }
+  }
+
+  if (cruce_agrupado) {
+    // Pasada 4: un comprobante contable = suma de varios movimientos del banco (4x1000, intereses, comisiones + IVA del mes…)
+    for (const l of libros.movimientos) {
+      if (usadosLibro.has(l.id)) continue;
+      const libres = extracto.movimientos.filter(b => !usadosBanco.has(b.id) && Math.sign(b.valor) === Math.sign(l.valor));
+      if (libres.length < 2) continue;
+      const grupos = new Map<string, MovimientoNormalizado[]>();
+      for (const b of libres) {
+        const fam = familiaDe(b);
+        if (fam) grupos.set(fam, [...(grupos.get(fam) || []), b]);
+        const desc = `DESC:${sinTildes(b.descripcion).replace(/\d+/g, '').replace(/\s+/g, ' ').trim()}`;
+        grupos.set(desc, [...(grupos.get(desc) || []), b]);
       }
+      let encontrado: MovimientoNormalizado[] | null = null;
+      for (const grupo of grupos.values()) {
+        if (grupo.length < 2) continue;
+        encontrado = subconjuntoQueSuma(grupo, l.valor, tolGrupo);
+        if (encontrado) break;
+      }
+      // Familias combinadas (p. ej. comisiones + 4x1000 en un solo comprobante)
+      if (!encontrado) {
+        const familias = FAMILIAS_BANCARIAS.map(([f]) => grupos.get(f) || []).filter(g => g.length);
+        for (let i = 0; i < familias.length && !encontrado; i++) {
+          for (let j = i + 1; j < familias.length && !encontrado; j++) {
+            const union = [...familias[i], ...familias[j]];
+            if (Math.abs(union.reduce((s, m) => s + m.valor, 0) - l.valor) <= tolGrupo) encontrado = union;
+          }
+        }
+      }
+      if (encontrado) registrar('AGRUPADA_BANCO', [l], encontrado);
+    }
+
+    // Pasada 5: un movimiento del banco (pago masivo, consignación de varios recibos) = varios registros contables de fechas cercanas
+    for (const b of extracto.movimientos) {
+      if (usadosBanco.has(b.id)) continue;
+      const cercanos = libros.movimientos
+        .filter(l => !usadosLibro.has(l.id) && Math.sign(l.valor) === Math.sign(b.valor) && diasEntre(l.fecha, b.fecha) <= Math.max(diasHolgura, 3))
+        .sort((x, y) => diasEntre(x.fecha, b.fecha) - diasEntre(y.fecha, b.fecha));
+      const grupo = subconjuntoQueSuma(cercanos, b.valor, tolGrupo);
+      if (grupo) registrar('AGRUPADA_LIBROS', grupo, [b]);
     }
   }
 
@@ -414,6 +532,7 @@ export function conciliar(
       pendiente_libros: r2(faltanEnLibros.reduce((s, m) => s + m.valor, 0)),
       pendiente_banco: r2(faltanEnBanco.reduce((s, m) => s + m.valor, 0))
     },
+    por_tipo: conciliadas.reduce((acc, c) => ({ ...acc, [c.tipo]: (acc[c.tipo] || 0) + 1 }), {} as Partial<Record<TipoCruce, number>>),
     advertencias: [...libros.advertencias.map(a => `Auxiliar: ${a}`), ...extracto.advertencias.map(a => `Extracto: ${a}`)]
   };
 }
@@ -443,7 +562,7 @@ export function reporteConciliacionExcel(r: ResultadoConciliacion, nombreEmpresa
   wsRes['!cols'] = [{ wch: 58 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 14 }];
   XLSX.utils.book_append_sheet(wb, wsRes, 'Resumen');
   XLSX.utils.book_append_sheet(wb, hoja(r.conciliadas.map(c => ({
-    Fecha: c.fecha, Comprobante: c.comprobante || '', Detalle: c.detalle, 'Valor libros': c.valor, 'Valor banco': c.valor_banco, Diferencia: c.diferencia, 'Descripción banco': c.descripcion_banco
+    'Fecha libros': c.fecha, 'Fecha banco': c.fecha_banco || '', Comprobante: c.comprobante || '', Detalle: c.detalle, 'Valor libros': c.valor, 'Valor banco': c.valor_banco, Diferencia: c.diferencia, 'Descripción banco': c.descripcion_banco, 'Tipo de cruce': c.tipo ? ETIQUETA_CRUCE[c.tipo] : '', 'Movs. banco': c.ids_banco?.length || 1, 'Movs. libros': c.ids_libro?.length || 1
   }))), 'Conciliadas');
   XLSX.utils.book_append_sheet(wb, hoja(r.faltan_en_libros.map(m => ({
     Fecha: m.fecha, Descripción: m.descripcion, Referencia: m.referencia || '', Valor: m.valor, Saldo: m.saldo ?? ''
