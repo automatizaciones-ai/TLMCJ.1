@@ -43,6 +43,7 @@ export interface SiigoSyncResponse {
   siigo_nombre?: string;
   mensaje: string;
   payloadSent?: any;
+  detalle_siigo?: any;
 }
 
 export class SiigoError extends Error {
@@ -233,16 +234,19 @@ export class SiigoService {
     if (f.estado_revision === 'SINCRONIZADA_SIIGO' && f.siigo_id) {
       return { ...base, status: 'omitida', siigo_id: f.siigo_id, mensaje: `Ya fue transmitida (${f.siigo_id}).` };
     }
+    // El payload se conserva también si Siigo rechaza la factura, para poder diagnosticar el error
+    let payload: any;
     try {
       const { impuestos } = await this.catalogos(cred);
-      const payload = this.construirCompra(f, { documentId: opciones.documentId, medioPagoId: opciones.medioPagoId, impuestos });
+      payload = this.construirCompra(f, { documentId: opciones.documentId, medioPagoId: opciones.medioPagoId, impuestos });
       if (!payload.payments[0].id) {
         return { ...base, status: 'error', mensaje: 'Falta el medio de pago (banco) de Siigo para esta factura.', payloadSent: payload };
       }
       const r: any = await this.llamar(cred, 'POST', '/v1/purchases', payload);
       return { ...base, status: 'success', siigo_id: r?.id, siigo_nombre: r?.name, mensaje: `Registrada en Siigo como ${r?.name || r?.id}.`, payloadSent: payload };
     } catch (err: any) {
-      return { ...base, status: 'error', mensaje: err.message };
+      // detalle_siigo: respuesta original de Siigo (códigos, campos y parámetros del error)
+      return { ...base, status: 'error', mensaje: err.message, payloadSent: payload, detalle_siigo: err?.detalle };
     }
   }
 

@@ -62,6 +62,8 @@ export class DataStore {
   public movimientosLibro: MovimientoLibro[] = [];
   public modificaciones: ModificacionRepositorio[] = [];
   public notificacionesSeguridad: NotificacionSeguridad[] = [];
+  /** Lo registra el servicio de notificaciones para enviar cada aviso de seguridad por correo */
+  public alNotificarSeguridad?: (item: NotificacionSeguridad) => void;
 
   public googleDriveConfig: GoogleDriveConfig = {
     cuenta_propietario: "automatizaciones@tlm.net.co",
@@ -632,13 +634,14 @@ export class DataStore {
       tipo: notif.tipo,
       codigo_otp: notif.codigo_otp,
       mensaje: notif.mensaje,
-      estado: 'ENVIADO'
+      estado: this.alNotificarSeguridad ? 'PENDIENTE' : 'SIMULADO'
     };
     this.notificacionesSeguridad.unshift(item);
     if (this.notificacionesSeguridad.length > 50) {
       this.notificacionesSeguridad.pop();
     }
     this.saveToDisk();
+    try { this.alNotificarSeguridad?.(item); } catch (err) { console.warn('[Seguridad] No se pudo enviar el correo:', err); }
     return item;
   }
 

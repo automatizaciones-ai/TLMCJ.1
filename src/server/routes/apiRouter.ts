@@ -4,6 +4,8 @@ import multer from 'multer';
 import { db, getDefaultPermissions } from '../storage/dataStore.ts';
 import { xmlParser, emparejarPdfs, type ParsedXmlInvoice } from '../services/xmlUblParser.ts';
 import { SoportesOriginales } from '../services/soportesOriginalesService.ts';
+import { NotificacionesService, ocultarSecretos } from '../services/notificacionesService.ts';
+import { CorreoService } from '../services/correoService.ts';
 import { reconciliationEngine } from '../services/reconciliationEngine.ts';
 import { f350TaxEngine } from '../services/f350TaxEngine.ts';
 import { siigoService } from '../services/siigoService.ts';
@@ -314,13 +316,18 @@ router.post('/auth/recuperar-password/solicitar-codigo', (req: Request, res: Res
     mensaje: `Hola ${user.nombre_completo}, has solicitado restablecer tu contraseña en la Consola TLM. Tu código de seguridad confidencial es: [${codigoOtp}]. Este código expira en 15 minutos. Si tú no realizaste esta solicitud, comunícate de inmediato con Juan Yaya (automatizaciones@tlm.net.co).`
   });
 
+  // Con un proveedor de correo configurado el código solo viaja por correo; sin proveedor (modo demostración) se muestra en pantalla
+  const correoReal = CorreoService.estado().configurado;
   res.json({
     ok: true,
-    mensaje: `Se ha enviado un código de seguridad de 6 dígitos al correo corporativo ${user.email}.`,
+    mensaje: correoReal
+      ? `Se envió un código de seguridad de 6 dígitos a ${user.email}. Revise también la carpeta de spam.`
+      : `No hay correo configurado en el servidor: el código se muestra en pantalla (modo demostración).`,
     email: user.email,
-    codigo_simulado: codigoOtp,
+    codigo_simulado: correoReal ? undefined : codigoOtp,
+    correo_enviado: correoReal,
     expira_en_minutos: 15,
-    notificacion: notif
+    notificacion: correoReal ? ocultarSecretos(notif) : notif
   });
 });
 
@@ -375,7 +382,8 @@ router.post('/auth/recuperar-password/verificar-y-cambiar', (req: Request, res: 
 });
 
 router.get('/auth/notificaciones-seguridad', (_req: Request, res: Response) => {
-  res.json(db.notificacionesSeguridad);
+  // Los códigos y contraseñas nunca se exponen en el historial
+  res.json(db.notificacionesSeguridad.map(ocultarSecretos));
 });
 
 router.post('/auth/register', (req: Request, res: Response) => {
@@ -408,6 +416,7 @@ router.post('/auth/register', (req: Request, res: Response) => {
 
   db.usuarios.push(nuevoUsuario);
   db.saveToDisk();
+  NotificacionesService.avisarAdminsRegistro(nuevoUsuario).catch(() => {});
   res.status(201).json({
     mensaje: "Registro solicitado correctamente. Un Administrador debe aprobar su acceso.",
     id_usuario: nuevoUsuario.id_usuario
@@ -431,11 +440,21 @@ router.patch('/auth/usuarios/:id/aprobar', async (req: Request, res: Response) =
   try {
     const updated = await CloudSqlService.updateUsuario(id, { activo: true });
     const user = db.usuarios.find(u => u.id_usuario === id);
+    const yaActivo = user?.activo;
     if (user) {
       user.activo = true;
       db.saveToDisk();
     }
-    res.json({ mensaje: `Usuario aprobado con éxito en Cloud SQL.`, usuario: updated || user });
+    const aprobado = updated || user;
+    if (aprobado?.email && !yaActivo) {
+      db.addNotificacionSeguridad({
+        destinatario: aprobado.email,
+        asunto: 'Tu acceso a la Consola TLM fue aprobado',
+        tipo: 'CUENTA_APROBADA',
+        mensaje: `Hola ${aprobado.nombre_completo}, un administrador aprobó tu acceso a la Consola TLM. Ya puedes iniciar sesión con el correo ${aprobado.email} y la contraseña que registraste.`
+      });
+    }
+    res.json({ mensaje: `Usuario aprobado con éxito en Cloud SQL.`, usuario: aprobado });
   } catch (err: any) {
     res.status(500).json({ detail: err.message });
   }
@@ -1614,6 +1633,17 @@ router.post('/facturas/upload', upload.array('archivos'), async (req: Request, r
     db.facturas = db.facturas.filter(f => !claves.has(`${f.id_empresa}|${f.cufe_hash}`) && !processedFacturas.some(p => p.id_factura === f.id_factura));
     db.facturas.push(...processedFacturas);
     db.saveToDisk();
+  }
+
+  if (empresaActiva && processedFacturas.length > 0) {
+    NotificacionesService.cargueFacturas(empresaActiva as any, {
+      archivos: files.length,
+      nuevas: processedFacturas.length - duplicadasCount,
+      duplicadas: duplicadasCount,
+      ventas: processedFacturas.filter(f => f.tipo_operacion === 'VENTA').length,
+      compras: processedFacturas.filter(f => f.tipo_operacion !== 'VENTA').length,
+      pdfs: pdfsOriginales
+    }, db.usuarios.find(u => u.id_usuario === Number(req.headers['x-tlm-user-id']))).catch(() => {});
   }
 
   res.json({

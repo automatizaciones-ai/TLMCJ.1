@@ -80,3 +80,23 @@ Esta versión toma las funciones de https://consola-tlm-cloud.onrender.com/ y la
   4. **Agrupada:** un comprobante contable igual a la suma de varios movimientos del banco. Es el caso de los cierres de Siigo que registran en un solo CC el total del 4×1000, de los intereses o de las comisiones con IVA.
   5. **Agrupada:** un movimiento del banco igual a varios comprobantes de fechas cercanas.
 - Cada partida conciliada muestra el tipo de cruce y la fecha del banco. El reporte Excel incluye las columnas "Tipo de cruce", "Fecha banco" y la cantidad de movimientos de cada lado.
+
+## Notificaciones por correo
+
+Se configuran en **Admin Usuarios & Cloud → Notificaciones (Correo)**.
+
+- **Servidor de correo.** Muestra el proveedor activo, el remitente y lo que falta configurar, y permite enviar un correo de prueba. Los secretos van en variables de entorno (ver `.env.example`):
+  - **Gmail / Google Workspace (`GMAIL_API`):** por HTTPS, con la cuenta de servicio y delegación de dominio para `gmail.send`, o con OAuth. Funciona en el plan gratuito de Render.
+  - **Resend (`RESEND`):** por HTTPS. También funciona en el plan gratuito de Render.
+  - **SMTP:** requiere plan pago en Render, porque el gratuito bloquea los puertos 25, 465 y 587.
+  - **Sin proveedor (`SIMULADO`):** no sale nada; los mensajes solo quedan en el historial.
+- **Por empresa.** Se activa o desactiva por empresa y se eligen los destinatarios fijos. Opcionalmente se avisa también a los usuarios asignados a la empresa y se envía copia a quien ejecuta la acción. Los eventos son:
+  - **Conciliación bancaria:** resultado del cruce con las partidas pendientes y el reporte Excel adjunto. Se puede limitar a cuando hay pendientes o descuadre.
+  - **Transmisión a Siigo:** exitosas y rechazadas con su motivo, más el informe Excel. Se puede limitar a cuando hay rechazos.
+  - **Cargue de facturas:** facturas nuevas, duplicadas y PDF originales guardados.
+- **Seguridad de las cuentas (global).** Los avisos que ya generaba el sistema ahora salen por correo: código de recuperación, contraseña provisional, cambio de contraseña, aprobación de cuenta y aviso a los administradores cuando alguien se registra.
+- **Seguridad del código de recuperación.** Antes, el código de recuperación se devolvía al navegador y aparecía en `/auth/notificaciones-seguridad`, que no exige sesión, así que cualquiera podía restablecer la contraseña de otro usuario.
+  - Con un proveedor de correo configurado, el código solo viaja por correo.
+  - El historial de seguridad oculta siempre los códigos, las contraseñas y los tokens.
+  - Sin proveedor configurado, se mantiene el modo demostración: el código se muestra en pantalla.
+- **Historial de envíos.** Queda en la tabla `correos_enviados` de PostgreSQL, con el estado de cada mensaje y el error si falló.

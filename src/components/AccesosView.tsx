@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Usuario, Empresa, PermisosUsuario, ModificacionRepositorio, RepositorioInfo, NotificacionSeguridad, GoogleDriveStatus, GoogleDriveFile, DesarrolladorAcceso, PermisosCodigo } from '../types/index.ts';
 import { AlmacenamientoEmpresasPanel } from './AlmacenamientoEmpresasPanel.tsx';
+import { NotificacionesCorreoPanel } from './NotificacionesCorreoPanel.tsx';
 import { FolderTree } from 'lucide-react';
 import { Users, Key, CircleCheck as CheckCircle, CircleAlert as AlertCircle, ShieldAlert, Trash2, UserCheck, Building2, Zap, Loader as Loader2, Shield, ShieldCheck, UserX, Database, HardDrive, Download, RefreshCw, FileSliders as Sliders, Check, X, Lock, Server, FileCode, Layers, ArrowRight, GitBranch, GitCommitVertical as GitCommit, GitPullRequest, Code as Code2, GitFork, Laptop, Sparkles, CircleCheck as CheckCircle2, History, Upload, Camera, Image as ImageIcon, Cloud, Globe, ExternalLink, Folder, FileText, FileSpreadsheet, Link2, FolderDown, Share2, Terminal, CheckCheck, Cpu, UserPlus, KeyRound, TriangleAlert as AlertTriangle, Copy, Clock, Send, Eye, EyeOff, Mail, Crown } from 'lucide-react';
 
@@ -54,7 +55,7 @@ export const AccesosView: React.FC<AccesosViewProps> = ({
   onSelectUser,
   primaryColor = '#271a82'
 }) => {
-  const [activeTab, setActiveTab] = useState<'usuarios' | 'almacenamiento-empresas' | 'base-de-datos' | 'desarrolladores-codigo' | 'google-cloud' | 'google-drive' | 'siigo' | 'seguridad-auditoria'>('usuarios');
+  const [activeTab, setActiveTab] = useState<'usuarios' | 'almacenamiento-empresas' | 'notificaciones-correo' | 'base-de-datos' | 'desarrolladores-codigo' | 'google-cloud' | 'google-drive' | 'siigo' | 'seguridad-auditoria'>('usuarios');
 
   // Desarrolladores & Acceso al Código Fuente state
   const [desarrolladores, setDesarrolladores] = useState<DesarrolladorAcceso[]>([]);
@@ -749,6 +750,18 @@ export const AccesosView: React.FC<AccesosViewProps> = ({
         </button>
 
         <button
+          onClick={() => setActiveTab('notificaciones-correo')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold rounded-lg transition cursor-pointer shrink-0 ${
+            activeTab === 'notificaciones-correo'
+              ? 'bg-[#271a82] text-white shadow-xs'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+          }`}
+        >
+          <Mail className="w-4 h-4 text-[#fa9d1c]" />
+          <span>Notificaciones (Correo)</span>
+        </button>
+
+        <button
           onClick={() => { setActiveTab('seguridad-auditoria'); fetchNotificaciones(); }}
           className={`flex items-center gap-2 px-4 py-2.5 text-xs font-bold rounded-lg transition cursor-pointer shrink-0 ${
             activeTab === 'seguridad-auditoria'
@@ -839,6 +852,10 @@ export const AccesosView: React.FC<AccesosViewProps> = ({
       </div>
 
       {/* TAB: CARPETAS / UNIDADES COMPARTIDAS POR EMPRESA */}
+      {activeTab === 'notificaciones-correo' && (
+        <NotificacionesCorreoPanel currentUser={currentUser} activeEmpresa={activeEmpresa} onShowToast={onShowToast} />
+      )}
+
       {activeTab === 'almacenamiento-empresas' && (
         <AlmacenamientoEmpresasPanel currentUser={currentUser} activeEmpresa={activeEmpresa} onShowToast={onShowToast} />
       )}

@@ -14,10 +14,12 @@ export interface NotificacionSeguridad {
   destinatario: string;
   asunto: string;
   fecha: string;
-  tipo: 'NUEVO_USUARIO' | 'RESET_ADMIN' | 'CODIGO_RECUPERACION' | 'PASSWORD_CAMBIADA' | 'ACCESO_CODIGO_DESARROLLADOR';
+  tipo: 'NUEVO_USUARIO' | 'RESET_ADMIN' | 'CODIGO_RECUPERACION' | 'PASSWORD_CAMBIADA' | 'ACCESO_CODIGO_DESARROLLADOR' | 'CUENTA_APROBADA';
   codigo_otp?: string;
   mensaje: string;
-  estado: 'ENVIADO';
+  /** PENDIENTE mientras sale el correo; SIMULADO si no hay proveedor de correo configurado */
+  estado: 'ENVIADO' | 'PENDIENTE' | 'SIMULADO' | 'ERROR';
+  error?: string;
 }
 
 export interface PermisosCodigo {

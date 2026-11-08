@@ -42,6 +42,8 @@ import {
 } from '../services/contabilidadService.ts';
 import { generarZipSoportes, generarPdfFactura } from '../services/soportesPdfService.ts';
 import { SoportesOriginales } from '../services/soportesOriginalesService.ts';
+import { NotificacionesService, EVENTOS_EMPRESA } from '../services/notificacionesService.ts';
+import { CorreoService, correoValido } from '../services/correoService.ts';
 import { leerAuxiliar, leerExtracto, leerPuc, leerBalance, type LecturaMovimientos } from '../services/lectorArchivosContables.ts';
 import { siigoService, type CredencialesSiigo } from '../services/siigoService.ts';
 import { CATALOGO_RTEFTE, CATALOGO_RTEICA, CATALOGO_RTEIVA, casillaPorTarifa } from '../../shared/catalogosDian.ts';
@@ -100,7 +102,7 @@ async function conEmpresa(req: Request, res: Response, next: NextFunction) {
 
 function soloAdmin(req: Request, res: Response, next: NextFunction) {
   if (!esAdmin(usuarioDeRequest(req))) {
-    return res.status(403).json({ detail: 'Solo un Administrador o Desarrollador puede cambiar el almacenamiento de las empresas.' });
+    return res.status(403).json({ detail: 'Esta acción solo la puede hacer un Administrador o Desarrollador.' });
   }
   next();
 }
@@ -156,6 +158,46 @@ const marcaTiempo = () => new Date().toISOString().replace(/[:T]/g, '-').substri
 // ==========================================
 // 1. ALMACENAMIENTO POR EMPRESA
 // ==========================================
+// ==========================================
+// Notificaciones por correo
+// ==========================================
+router.get('/correo/estado', async (_req, res) => {
+  res.json({ ...CorreoService.estado(), seguridad: await NotificacionesService.seguridad(), eventos: EVENTOS_EMPRESA });
+});
+
+router.put('/correo/seguridad', soloAdmin, async (req, res) => {
+  res.json(await NotificacionesService.guardarSeguridad({
+    activo: req.body?.activo !== undefined ? Boolean(req.body.activo) : undefined,
+    avisar_admins_registro: req.body?.avisar_admins_registro !== undefined ? Boolean(req.body.avisar_admins_registro) : undefined
+  } as any));
+});
+
+router.post('/correo/prueba', soloAdmin, async (req, res) => {
+  const para = (Array.isArray(req.body?.para) ? req.body.para : String(req.body?.para || '').split(/[,;\s]+/)).map((c: string) => c.trim()).filter(Boolean);
+  if (!para.length || !para.every(correoValido)) return res.status(400).json({ detail: 'Escriba uno o más correos válidos para la prueba.' });
+  const empresa = req.body?.id_empresa ? await obtenerEmpresa(Number(req.body.id_empresa)) : null;
+  const r = await NotificacionesService.prueba(para, empresa);
+  if (!r.ok) return res.status(502).json({ detail: r.error || 'No se pudo enviar el correo.', proveedor: r.proveedor });
+  res.json({ ...r, mensaje: r.simulado ? 'No hay proveedor de correo configurado: el mensaje quedó solo en el historial (modo simulado).' : `Correo de prueba enviado a ${para.join(', ')} por ${r.proveedor}.` });
+});
+
+router.get('/correo/historial', async (req, res) => {
+  const id = Number(req.query.id_empresa) || undefined;
+  res.json(await CorreoService.historial(id, Math.min(Number(req.query.limite) || 100, 500)));
+});
+
+router.get('/empresas/:id/notificaciones', conEmpresa, async (req, res) => {
+  res.json(await NotificacionesService.config(empresaDe(req).id_empresa));
+});
+
+router.put('/empresas/:id/notificaciones', conEmpresa, soloAdmin, async (req, res) => {
+  try {
+    res.json(await NotificacionesService.guardarConfig(empresaDe(req).id_empresa, req.body || {}, nombreUsuario(req)));
+  } catch (err: any) {
+    res.status(400).json({ detail: err.message });
+  }
+});
+
 router.get('/almacenamiento/credenciales', (_req, res) => {
   const c = EmpresaStorageService.credenciales();
   res.json({
@@ -474,8 +516,7 @@ router.post('/empresas/:id/siigo/enviar', conEmpresa, async (req, res) => {
       const local = db.facturas.find(x => x.id_factura === f.id_factura);
       if (local) Object.assign(local, cambios);
     }
-    const { payloadSent, ...sinPayload } = r;
-    reporte.push(sinPayload);
+    reporte.push(r);
   }
   db.saveToDisk();
 
@@ -488,7 +529,10 @@ router.post('/empresas/:id/siigo/enviar', conEmpresa, async (req, res) => {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reporte.map(r => ({
     'Factura N°': r.factura_num, 'NIT Tercero': r.nit_tercero, Proveedor: r.proveedor,
     Estado: r.status === 'success' ? 'EXITOSA' : r.status === 'omitida' ? 'OMITIDA' : 'FALLIDA',
-    'Documento Siigo': r.siigo_nombre || r.siigo_id || '', Detalle: r.mensaje
+    'Documento Siigo': r.siigo_nombre || r.siigo_id || '', Detalle: r.mensaje,
+    // JSON exacto que se envió a Siigo, para revisar qué campo rechazó
+    'Payload enviado': r.payloadSent ? JSON.stringify(r.payloadSent) : '',
+    'Respuesta de Siigo': r.detalle_siigo ? JSON.stringify(r.detalle_siigo) : ''
   }))), 'Transmisión Siigo');
   const informe = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
   const archivo = await EmpresaStorageService.archivar({
@@ -496,6 +540,7 @@ router.post('/empresas/:id/siigo/enviar', conEmpresa, async (req, res) => {
     contenido: informe, mime: MIME_XLSX, periodo: periodoDeFacturas(facturas), usuario: nombreUsuario(req)
   });
 
+  NotificacionesService.siigo(e, { exitosas, fallidas, omitidas, reporte_detalle: reporte }, informe, usuarioDeRequest(req)).catch(err => console.warn('[Notificaciones] Siigo:', err?.message));
   res.json({ exitosas, fallidas, omitidas, reporte_detalle: reporte, informe_xlsx_b64: informe.toString('base64'), archivado: archivo.ok && !archivo.omitido });
 });
 
@@ -579,6 +624,11 @@ router.post(
     const ref = refEmpresa(e);
     if (aux) archivados.push(await EmpresaStorageService.archivar({ empresa: ref, categoria: 'CONCILIACIONES', nombre: `Auxiliar_${aux.originalname}`, contenido: aux.buffer, mime: aux.mimetype, periodo, usuario: nombreUsuario(req) }));
     if (ext) archivados.push(await EmpresaStorageService.archivar({ empresa: ref, categoria: 'CONCILIACIONES', nombre: `Extracto_${ext.originalname}`, contenido: ext.buffer, mime: ext.mimetype, periodo, usuario: nombreUsuario(req) }));
+
+    // Aviso por correo (sin demorar la respuesta)
+    let reporte: Buffer | null = null;
+    try { reporte = reporteConciliacionExcel(resultado, `${e.nombre_comercial} (NIT ${e.nit})`); } catch {}
+    NotificacionesService.conciliacion(e, resultado, reporte, usuarioDeRequest(req)).catch(err => console.warn('[Notificaciones] Conciliación:', err?.message));
 
     res.json({ ...resultado, archivado: archivados.map(a => ({ ok: a.ok, omitido: a.omitido, error: a.error, nombre: a.archivo?.nombre })) });
   }

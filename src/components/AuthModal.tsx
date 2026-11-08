@@ -316,7 +316,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setSimulatedOtpCode(data.codigo_simulado || null);
       setRecoveryCode(data.codigo_simulado || '');
       setRecoveryStep(2);
-      onShowToast(`Código generado y enviado al correo corporativo ${recoveryEmail.trim()}.`);
+      onShowToast(data.mensaje || `Código enviado al correo ${recoveryEmail.trim()}.`);
     } catch (err: any) {
       setErrorMsg(err.message || 'Error de comunicación');
     } finally {
@@ -918,7 +918,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {/* PASO 2: VERIFICAR CÓDIGO & ESTABLECER NUEVA CONTRASEÑA */}
               {recoveryStep === 2 && (
                 <form onSubmit={handleVerifyOtpAndReset} className="space-y-4">
-                  {/* Bandeja Simulada en Pantalla para Validación Rápida */}
+                  {!simulatedOtpCode && (
+                    <div className="p-3.5 bg-indigo-50 border border-indigo-200 rounded-2xl flex items-start gap-3 text-xs text-indigo-950">
+                      <Mail className="w-4 h-4 mt-0.5 text-indigo-700 shrink-0" />
+                      <span>Enviamos un código de 6 dígitos a <b>{recoveryEmail}</b>. Es válido por 15 minutos; si no lo ve, revise la carpeta de spam.</span>
+                    </div>
+                  )}
+                  {/* Modo demostración (sin servidor de correo): el código se muestra en pantalla */}
                   {simulatedOtpCode && (
                     <div className="p-3.5 bg-emerald-50 border border-emerald-300 rounded-2xl flex items-start gap-3">
                       <div className="p-1.5 bg-emerald-600 text-white rounded-lg shrink-0 mt-0.5">

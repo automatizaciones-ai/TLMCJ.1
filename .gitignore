@@ -12,3 +12,6 @@ coverage/
 /storage/
 data/almacenamiento_empresas.json
 data/conciliaciones_empresas.json
+
+# Configuración de notificaciones generada en tiempo de ejecución (la persistente está en PostgreSQL)
+data/notificaciones_config.json
