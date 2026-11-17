@@ -5,7 +5,7 @@
   "repositorio_propietario": "Juan Yaya - Administrador Maestro",
   "updatedAt": "2026-10-21T15:08:05.849Z",
   "usuarios": [
-    {     
+    {        
       "id_usuario": 1,
       "nombre_completo": "Juan Yaya (Administrador Maestro)",
       "email": "juan.yaya@tlm.net.co",
