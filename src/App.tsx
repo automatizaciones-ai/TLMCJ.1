@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Header } from './components/Header.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
@@ -263,6 +263,30 @@ export default function App() {
       setIsRefreshing(false);
     }
   };
+
+  // Solicitudes de acceso: el administrador recibe el aviso dentro de la app (cada 60 s)
+  const pendientesVistos = useRef<Set<number> | null>(null);
+  useEffect(() => {
+    if (currentUser?.rol !== 'Administrador') return;
+    const revisar = async () => {
+      try {
+        const res = await fetch('/api/v1/auth/usuarios');
+        const lista: Usuario[] = await res.json();
+        if (!Array.isArray(lista)) return;
+        const pendientes = lista.filter(u => !u.activo);
+        if (pendientesVistos.current) {
+          pendientes
+            .filter(u => !pendientesVistos.current!.has(u.id_usuario))
+            .forEach(u => showToast(`Nueva solicitud de acceso: ${u.nombre_completo}`, 'info'));
+        }
+        pendientesVistos.current = new Set(pendientes.map(u => u.id_usuario));
+        setUsuarios(lista);
+      } catch { /* sin conexión: se reintenta en el siguiente ciclo */ }
+    };
+    revisar();
+    const intervalo = setInterval(revisar, 60000);
+    return () => clearInterval(intervalo);
+  }, [currentUser?.id_usuario]);
 
   // Al abrir la página: recupera la sesión existente o muestra el inicio de sesión
   useEffect(() => {
@@ -690,6 +714,7 @@ export default function App() {
         onSelectEmpresa={(e) => { setActiveEmpresa(e); setFacturas([]); }}
         onCrearEmpresa={() => setNuevaEmpresaAbierta(true)}
         pendingInvoicesCount={pendingInvoices}
+        pendingAccesosCount={currentUser?.rol === 'Administrador' ? usuarios.filter(u => !u.activo).length : 0}
         customLogoUrl={customLogoUrl}
         currentUser={currentUser}
         primaryColor={primaryColor}

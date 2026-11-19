@@ -28,6 +28,7 @@ interface SidebarProps {
   onSelectEmpresa: (empresa: Empresa) => void;
   onCrearEmpresa?: () => void;
   pendingInvoicesCount: number;
+  pendingAccesosCount?: number;
   customLogoUrl?: string | null;
   currentUser?: Usuario | null;
   primaryColor?: string;
@@ -58,6 +59,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectEmpresa,
   onCrearEmpresa,
   pendingInvoicesCount,
+  pendingAccesosCount = 0,
   customLogoUrl = null,
   currentUser = null,
   primaryColor = '#271a82',
@@ -80,7 +82,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'conciliacion', label: 'Conciliación Bancaria', icon: Scale },
     { id: 'cerebro', label: 'Cerebro Contable PUC', icon: BookOpen },
     ...(canManageUsers
-      ? [{ id: 'accesos', label: 'Admin Usuarios & Cloud', icon: Users }]
+      ? [{ id: 'accesos', label: 'Admin Usuarios & Cloud', icon: Users, badge: pendingAccesosCount > 0 ? pendingAccesosCount : null }]
       : []),
     ...(isAdminOrDeveloper
       ? [
