@@ -1082,11 +1082,16 @@ export const BaseDatosCloudView: React.FC<BaseDatosCloudViewProps> = ({
       {activeTab === 'conexion-externa' && (
         <div className="space-y-6">
           {/* Active Connection Status Bar */}
-          <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white rounded-3xl p-6 sm:p-7 border border-indigo-900/40 shadow-md">
+          <div
+            className="text-white rounded-3xl p-6 sm:p-7 border border-white/15 shadow-md transition-colors duration-200"
+            style={{
+              background: `linear-gradient(135deg, var(--tlm-sidebar-bg, #1c1343) 0%, var(--tlm-primary, ${primaryColor}) 100%)`
+            }}
+          >
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-white/10">
               <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-2xl bg-indigo-600/30 border border-indigo-400/30 flex items-center justify-center shrink-0">
-                  <Database className="w-6 h-6 text-indigo-300" />
+                <div className="w-12 h-12 rounded-2xl bg-white/15 border border-white/20 flex items-center justify-center shrink-0">
+                  <Database className="w-6 h-6 text-white/90" />
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
@@ -1098,7 +1103,7 @@ export const BaseDatosCloudView: React.FC<BaseDatosCloudViewProps> = ({
                       {data?.estado || 'EN LÍNEA ACTIVO'}
                     </span>
                   </div>
-                  <p className="text-xs text-indigo-200 mt-0.5 font-mono">
+                  <p className="text-xs text-white/80 mt-0.5 font-mono">
                     Host: <span className="text-white font-bold">{data?.cloud_host || extHost}</span>
                   </p>
                 </div>
@@ -1118,24 +1123,24 @@ export const BaseDatosCloudView: React.FC<BaseDatosCloudViewProps> = ({
             {/* Quick Metrics */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-5">
               <div className="bg-black/25 rounded-2xl p-3.5 border border-white/5">
-                <span className="text-[10px] uppercase font-bold text-indigo-300 tracking-wider">Tablas Activas</span>
+                <span className="text-[10px] uppercase font-bold text-white/75 tracking-wider">Tablas Activas</span>
                 <p className="text-lg font-black text-white mt-0.5">{data?.tablas.length || 8} tablas</p>
                 <span className="text-[10px] text-emerald-400">Esquema ACID</span>
               </div>
               <div className="bg-black/25 rounded-2xl p-3.5 border border-white/5">
-                <span className="text-[10px] uppercase font-bold text-indigo-300 tracking-wider">Total Registros</span>
+                <span className="text-[10px] uppercase font-bold text-white/75 tracking-wider">Total Registros</span>
                 <p className="text-lg font-black text-white mt-0.5">{data?.estadisticas.total_registros || 48} filas</p>
-                <span className="text-[10px] text-indigo-300">Consultas en vivo</span>
+                <span className="text-[10px] text-white/75">Consultas en vivo</span>
               </div>
               <div className="bg-black/25 rounded-2xl p-3.5 border border-white/5">
-                <span className="text-[10px] uppercase font-bold text-indigo-300 tracking-wider">Base de Datos</span>
+                <span className="text-[10px] uppercase font-bold text-white/75 tracking-wider">Base de Datos</span>
                 <p className="text-lg font-black text-white mt-0.5 font-mono">{data?.persistencia.archivo || 'postgres'}</p>
-                <span className="text-[10px] text-indigo-300">Usuario: {data?.cloud_user || 'postgres'}</span>
+                <span className="text-[10px] text-white/75">Usuario: {data?.cloud_user || 'postgres'}</span>
               </div>
               <div className="bg-black/25 rounded-2xl p-3.5 border border-white/5">
-                <span className="text-[10px] uppercase font-bold text-indigo-300 tracking-wider">Seguridad Canal</span>
+                <span className="text-[10px] uppercase font-bold text-white/75 tracking-wider">Seguridad Canal</span>
                 <p className="text-lg font-black text-emerald-400 mt-0.5 font-mono">SSL / TLS v1.3</p>
-                <span className="text-[10px] text-slate-400">Puerto 5432</span>
+                <span className="text-[10px] text-slate-300">Puerto 5432</span>
               </div>
             </div>
           </div>
