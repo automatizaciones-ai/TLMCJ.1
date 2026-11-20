@@ -240,6 +240,7 @@ export class GoogleDriveClient {
     const token = await this.accessToken();
     const res = await fetch(url, {
       ...init,
+      signal: init.signal ?? AbortSignal.timeout(30_000),
       headers: { Authorization: `Bearer ${token}`, ...(init.headers || {}) }
     });
     if (!res.ok) {

@@ -359,9 +359,9 @@ export const BaseDatosCloudView: React.FC<BaseDatosCloudViewProps> = ({
     <div className="space-y-6 max-w-7xl mx-auto pb-12 animate-in fade-in duration-300">
       {/* Top Banner: Cloud Status & App URL */}
       <div 
-        className="rounded-3xl p-6 sm:p-8 text-white relative overflow-hidden shadow-xl border border-white/10"
+        className="rounded-3xl p-6 sm:p-8 text-white relative overflow-hidden shadow-xl border border-white/10 transition-colors duration-200"
         style={{
-          background: `linear-gradient(135deg, ${primaryColor} 0%, #1c1343 65%, #0f0a28 100%)`
+          background: `linear-gradient(135deg, var(--tlm-sidebar-bg, #1c1343) 0%, var(--tlm-primary, ${primaryColor}) 100%)`
         }}
       >
         <div className="absolute top-0 right-0 w-96 h-96 bg-white/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
@@ -992,7 +992,7 @@ export const BaseDatosCloudView: React.FC<BaseDatosCloudViewProps> = ({
               <button
                 onClick={handleExecuteCloudMigration}
                 disabled={isMigrating}
-                className="px-6 py-3 rounded-2xl bg-gradient-to-r from-[#271a82] to-indigo-800 hover:from-indigo-900 hover:to-indigo-950 text-white font-black text-xs uppercase tracking-wider transition shadow-lg shadow-indigo-900/20 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                className="px-6 py-3 rounded-2xl bg-[#271a82] hover:bg-[#1c1343] text-white font-black text-xs uppercase tracking-wider transition shadow-lg flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {isMigrating ? (
                   <>

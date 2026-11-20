@@ -148,14 +148,13 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
       fd.append('banco', banco);
       fd.append('cruce_por_valor', String(cruceInteligente));
       fd.append('cruce_agrupado', String(cruceInteligente));
-      const r = await apiJson<Resultado & { archivado?: { ok: boolean; error?: string }[] }>(`/api/v1/empresas/${idEmpresa}/conciliacion/ejecutar`, { method: 'POST', body: fd });
+      const r = await apiJson<Resultado & { archivado_pendiente?: boolean }>(`/api/v1/empresas/${idEmpresa}/conciliacion/ejecutar`, { method: 'POST', body: fd });
       setResultado(r);
       setTieneArchivos({ aux: true, ext: true });
       setSeleccion(r.faltan_en_libros.map(m => m.id));
       setAuxiliar(null);
       setExtracto(null);
-      const fallos = (r.archivado || []).filter(a => !a.ok).length;
-      avisar(`Cruce ejecutado: ${r.conciliadas.length} conciliadas, ${r.faltan_en_libros.length} faltan en libros, ${r.faltan_en_banco.length} faltan en banco.${fallos ? ' Algunos archivos no se guardaron en la carpeta de la empresa.' : ''}`, fallos ? 'info' : 'success');
+      avisar(`Cruce ejecutado: ${r.conciliadas.length} conciliadas, ${r.faltan_en_libros.length} faltan en libros, ${r.faltan_en_banco.length} faltan en banco.${r.archivado_pendiente ? ' El archivado de los archivos se ejecuta en segundo plano.' : ''}`);
     } catch (err: any) {
       avisar(err.message, 'error');
     } finally {

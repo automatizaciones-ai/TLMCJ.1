@@ -148,7 +148,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner with Official TLM Identity & Colors */}
-      <div className="bg-gradient-to-r from-[#1c1343] via-[#271a82] to-[#4059aa] rounded-2xl p-6 text-white shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-6 border border-indigo-900/50 relative overflow-hidden">
+      <div
+        className="rounded-2xl p-6 text-white shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-6 border border-white/15 relative overflow-hidden transition-colors duration-200"
+        style={{ background: 'linear-gradient(135deg, var(--tlm-sidebar-bg, #1c1343) 0%, var(--tlm-primary, #271a82) 100%)' }}
+      >
         {/* Subtle decorative glow */}
         <div className="pointer-events-none absolute -top-24 -right-12 w-96 h-96 rounded-full bg-[#fa9d1c]/15 blur-3xl"></div>
         <div className="pointer-events-none absolute -bottom-24 -left-12 w-96 h-96 rounded-full bg-[#e64519]/15 blur-3xl"></div>
@@ -348,8 +351,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </div>
                   <div className="w-full bg-slate-200 h-1.5 rounded-full mt-1 overflow-hidden">
                     <div 
-                      className="bg-gradient-to-r from-[#271a82] to-[#4059aa] h-full rounded-full" 
-                      style={{ width: `${perc}%` }}
+                      className="h-full rounded-full transition-colors duration-200"
+                      style={{ width: `${perc}%`, background: 'linear-gradient(90deg, var(--tlm-sidebar-bg, #1c1343), var(--tlm-primary, #271a82))' }}
                     ></div>
                   </div>
                 </div>

@@ -177,7 +177,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     ? 'bg-black/25 text-white/90 hover:bg-black/40 hover:text-white border border-white/15'
                     : 'text-white/80 hover:bg-white/10 hover:text-white'
                 }`}
-                style={isActive ? { background: `linear-gradient(135deg, ${primaryColor}, #4059aa)` } : undefined}
+                style={isActive ? { background: `linear-gradient(135deg, ${primaryColor}, color-mix(in srgb, ${primaryColor} 78%, ${sidebarColor}))` } : undefined}
               >
                 <div className="flex items-center gap-3">
                   <Icon className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-[#fa9d1c]' : item.highlight ? 'text-[#e64519]' : 'text-white/70'}`} />
@@ -200,41 +200,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
         style={{ backgroundColor: footerBg }}
       >
         {!collapsed ? (
-          <>
-            <div className="bg-black/20 rounded-xl p-2 border border-white/10">
-              <div className="flex items-center justify-between mb-0.5">
-                <span className="text-[10px] font-medium text-white/80">Estado Siigo Nube</span>
-                {(activeEmpresa as any)?.has_siigo_credentials ? (
-                  <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-400">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                    Configurado
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-[10px] font-semibold text-white/50">
-                    <span className="w-1.5 h-1.5 rounded-full bg-white/40"></span>
-                    Sin conexión
-                  </span>
-                )}
-              </div>
-              <p className="text-[10px] text-white/60 truncate">
-                ERP: {activeEmpresa?.software_erp || 'SIIGO NUBE v1'}
-              </p>
-            </div>
-
-            <div className="flex items-center justify-between px-1 text-[10px] text-white/70">
-              <span className="flex items-center gap-1 font-semibold text-white/90">
-                <ShieldCheck className="w-3 h-3 text-[#fa9d1c]" /> Sociedad BIC
-              </span>
-              <a
-                href="https://www.tlmcol.com/"
-                target="_blank"
-                rel="noreferrer"
-                className="hover:text-white flex items-center gap-0.5 text-[#fa9d1c] transition"
-              >
-                tlmcol.com <ExternalLink className="w-2.5 h-2.5" />
-              </a>
-            </div>
-          </>
+          <div className="flex items-center justify-between px-1 text-[10px] text-white/70">
+            <span className="flex items-center gap-1 font-semibold text-white/90">
+              <ShieldCheck className="w-3 h-3 text-[#fa9d1c]" /> Sociedad BIC
+            </span>
+            <a
+              href="https://www.tlmcol.com/"
+              target="_blank"
+              rel="noreferrer"
+              className="hover:text-white flex items-center gap-0.5 text-[#fa9d1c] transition"
+            >
+              tlmcol.com <ExternalLink className="w-2.5 h-2.5" />
+            </a>
+          </div>
         ) : (
           <div className="flex flex-col items-center gap-2 py-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400" title="Siigo Nube Online"></span>

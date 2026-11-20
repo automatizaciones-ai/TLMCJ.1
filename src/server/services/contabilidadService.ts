@@ -387,14 +387,58 @@ function subconjuntoQueSuma(candidatos: MovimientoNormalizado[], objetivo: numbe
   // Primero el grupo completo (lo más común: el total del mes)
   const total = lista.reduce((s, m) => s + m.valor, 0);
   if (Math.abs(total - objetivo) <= tolerancia) return lista;
+
+  const mitad = Math.floor(n / 2);
+  const generarSubconjuntos = (inicio: number, fin: number) => {
+    let subconjuntos = [{ suma: 0, mask: 0, cuenta: 0 }];
+    for (let i = inicio; i < fin; i++) {
+      const previos = subconjuntos;
+      subconjuntos = [...previos];
+      for (const previo of previos) {
+        subconjuntos.push({
+          suma: previo.suma + lista[i].valor,
+          mask: previo.mask | (1 << (i - inicio)),
+          cuenta: previo.cuenta + 1
+        });
+      }
+    }
+    return subconjuntos;
+  };
+  const izquierda = generarSubconjuntos(0, mitad);
+  const derecha = generarSubconjuntos(mitad, n).sort((a, b) =>
+    a.suma - b.suma || b.cuenta - a.cuenta || a.mask - b.mask
+  );
+  const limiteInferior = (suma: number) => {
+    let inicio = 0;
+    let fin = derecha.length;
+    while (inicio < fin) {
+      const medio = (inicio + fin) >>> 1;
+      if (derecha[medio].suma < suma) inicio = medio + 1;
+      else fin = medio;
+    }
+    return inicio;
+  };
+  const primeroDeSuma = (indice: number) => {
+    if (indice < 0 || indice >= derecha.length) return null;
+    return derecha[limiteInferior(derecha[indice].suma)];
+  };
+
   let mejor: { mask: number; dif: number; cuenta: number } | null = null;
-  for (let mask = 1; mask < (1 << n); mask++) {
-    const cuenta = (mask.toString(2).match(/1/g) || []).length;
-    if (cuenta < 2) continue;
-    let suma = 0;
-    for (let i = 0; i < n; i++) if (mask & (1 << i)) suma += lista[i].valor;
-    const dif = Math.abs(suma - objetivo);
-    if (dif <= tolerancia && (!mejor || dif < mejor.dif || (dif === mejor.dif && cuenta > mejor.cuenta))) mejor = { mask, dif, cuenta };
+  const considerar = (subL: typeof izquierda[number], subR: typeof derecha[number] | null) => {
+    if (!subR || subL.cuenta + subR.cuenta < 2) return;
+    const dif = Math.abs(subL.suma + subR.suma - objetivo);
+    if (dif > tolerancia) return;
+    const mask = subL.mask | (subR.mask << mitad);
+    const cuenta = subL.cuenta + subR.cuenta;
+    if (!mejor || dif < mejor.dif || (dif === mejor.dif && (cuenta > mejor.cuenta || (cuenta === mejor.cuenta && mask < mejor.mask)))) {
+      mejor = { mask, dif, cuenta };
+    }
+  };
+
+  for (const subL of izquierda) {
+    const indice = limiteInferior(objetivo - subL.suma);
+    considerar(subL, primeroDeSuma(indice));
+    if (indice > 0) considerar(subL, primeroDeSuma(indice - 1));
   }
   return mejor ? lista.filter((_, i) => mejor!.mask & (1 << i)) : null;
 }
