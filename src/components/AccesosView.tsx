@@ -681,7 +681,10 @@ export const AccesosView: React.FC<AccesosViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner with Admin Context */}
-      <div className="bg-gradient-to-r from-[#1c1343] via-[#271a82] to-[#4059aa] rounded-2xl p-6 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div
+        className="rounded-2xl p-6 text-white shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4 border border-white/15 transition-colors duration-200"
+        style={{ background: 'linear-gradient(135deg, var(--tlm-sidebar-bg, #1c1343) 0%, var(--tlm-primary, #271a82) 100%)' }}
+      >
         <div>
           <div className="flex items-center gap-2 mb-1.5">
             <span className="text-[11px] font-bold text-white bg-[#e64519] px-2.5 py-0.5 rounded-full uppercase tracking-wider">

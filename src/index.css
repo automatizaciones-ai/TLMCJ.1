@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+:root {
+  --tlm-primary: #271a82;
+  --tlm-sidebar-bg: #1c1343;
+}
+
 /* Custom modern scrollbar styles */
 ::-webkit-scrollbar {
   width: 6px;
@@ -25,4 +30,43 @@
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+@layer utilities {
+  .bg-\[\#271a82\],
+  .bg-\[\#271A82\] {
+    background-color: var(--tlm-primary, #271a82);
+  }
+
+  .bg-\[\#1c1343\],
+  .bg-\[\#1C1343\] {
+    background-color: var(--tlm-sidebar-bg, #1c1343);
+  }
+
+  .hover\:bg-\[\#1c1343\]:hover,
+  .hover\:bg-\[\#1C1343\]:hover,
+  .bg-\[\#271a82\].hover\:bg-indigo-900:hover,
+  .bg-\[\#271A82\].hover\:bg-indigo-900:hover {
+    background-color: color-mix(in srgb, var(--tlm-primary, #271a82) 82%, black);
+  }
+
+  .hover\:bg-\[\#271a82\]:hover,
+  .hover\:bg-\[\#271A82\]:hover {
+    background-color: var(--tlm-primary, #271a82);
+  }
+
+  .text-\[\#271a82\],
+  .text-\[\#271A82\],
+  .hover\:text-\[\#271a82\]:hover,
+  .group:hover .group-hover\:text-\[\#271a82\] {
+    color: var(--tlm-primary, #271a82);
+  }
+
+  .border-\[\#271a82\],
+  .border-\[\#271A82\],
+  .hover\:border-\[\#271a82\]:hover,
+  .focus\:border-\[\#271a82\]:focus,
+  .focus\:border-\[\#271A82\]:focus {
+    border-color: var(--tlm-primary, #271a82);
+  }
 }

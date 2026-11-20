@@ -21,8 +21,7 @@ import {
   LISTA_CATEGORIAS,
   periodoActual,
   type CategoriaArchivo,
-  type EmpresaRef,
-  type ResultadoArchivo
+  type EmpresaRef
 } from '../services/empresaStorageService.ts';
 import {
   generarAuditoriaExcel,
@@ -601,7 +600,6 @@ router.post(
     const aux = archivos?.auxiliar?.[0];
     const ext = archivos?.extracto?.[0];
     const estado: EstadoConciliacion = conciliaciones.get(e.id_empresa) || {};
-    const archivados: ResultadoArchivo[] = [];
 
     try {
       if (aux) {
@@ -635,15 +633,34 @@ router.post(
 
     const periodo = (estado.extracto.movimientos[0]?.fecha || '').substring(0, 7) || undefined;
     const ref = refEmpresa(e);
-    if (aux) archivados.push(await EmpresaStorageService.archivar({ empresa: ref, categoria: 'CONCILIACIONES', nombre: `Auxiliar_${aux.originalname}`, contenido: aux.buffer, mime: aux.mimetype, periodo, usuario: nombreUsuario(req) }));
-    if (ext) archivados.push(await EmpresaStorageService.archivar({ empresa: ref, categoria: 'CONCILIACIONES', nombre: `Extracto_${ext.originalname}`, contenido: ext.buffer, mime: ext.mimetype, periodo, usuario: nombreUsuario(req) }));
+    const usuario = nombreUsuario(req);
+    const archivosParaArchivar = [
+      ...(aux ? [{ nombre: `Auxiliar_${aux.originalname}`, contenido: aux.buffer, mime: aux.mimetype }] : []),
+      ...(ext ? [{ nombre: `Extracto_${ext.originalname}`, contenido: ext.buffer, mime: ext.mimetype }] : [])
+    ];
 
     // Aviso por correo (sin demorar la respuesta)
     let reporte: Buffer | null = null;
     try { reporte = reporteConciliacionExcel(resultado, `${e.nombre_comercial} (NIT ${e.nit})`); } catch {}
     NotificacionesService.conciliacion(e, resultado, reporte, usuarioDeRequest(req)).catch(err => console.warn('[Notificaciones] Conciliación:', err?.message));
 
-    res.json({ ...resultado, archivado: archivados.map(a => ({ ok: a.ok, omitido: a.omitido, error: a.error, nombre: a.archivo?.nombre })) });
+    res.json({ ...resultado, archivado_pendiente: archivosParaArchivar.length > 0 });
+    if (archivosParaArchivar.length) {
+      setImmediate(() => {
+        void Promise.all(archivosParaArchivar.map(archivo => EmpresaStorageService.archivar({
+          empresa: ref,
+          categoria: 'CONCILIACIONES',
+          ...archivo,
+          periodo,
+          usuario
+        }))).then(archivados => {
+          const fallidos = archivados.filter(a => !a.ok);
+          if (fallidos.length) {
+            console.warn(`[Conciliación] No se pudieron archivar ${fallidos.length} archivo(s) de la empresa ${e.id_empresa}.`);
+          }
+        }).catch(err => console.error('[Conciliación] Error archivando los archivos de entrada:', err));
+      });
+    }
   }
 );
 

@@ -482,30 +482,30 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
 
         <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-100">
           <span className="text-[10px] font-bold uppercase text-slate-400 mr-1">Asignación en lote <span className="normal-case font-normal">(a las marcadas)</span>:</span>
-          <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl pl-2">
-            <span className="text-[10px] font-bold text-slate-600">Banco</span>
+          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl p-1 pl-2.5">
+            <span className="text-[10px] font-bold text-slate-600 shrink-0">Banco</span>
             {catalogos.medios_pago.length ? (
               <select value={bancoLote} onChange={e => setBancoLote(e.target.value)} className="bg-transparent px-1.5 py-1.5 text-xs max-w-[160px] focus:outline-none">
                 <option value="">Default (Siigo)</option>
                 {catalogos.medios_pago.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
               </select>
             ) : (
-              <input value={bancoLote} onChange={e => setBancoLote(e.target.value.replace(/[^\d]/g, ''))} placeholder="Cuenta (ej. 11100505)" className="bg-transparent px-1.5 py-1.5 text-xs w-36 font-mono focus:outline-none" />
+              <input value={bancoLote} onChange={e => setBancoLote(e.target.value.replace(/[^\d]/g, ''))} placeholder="Cuenta (ej. 11100505)" className="min-w-0 w-44 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#271a82]" />
             )}
-            <button disabled={!!ocupado} onClick={() => masivo(selectedIds, catalogos.medios_pago.length ? { id_medio_pago: bancoLote || null } : { banco_siigo: bancoLote }, 'Banco asignado')} className="px-2 py-1.5 rounded-lg bg-[#271a82] text-white text-[10px] font-bold cursor-pointer disabled:opacity-50">Aplicar</button>
+            <button disabled={!!ocupado} onClick={() => masivo(selectedIds, catalogos.medios_pago.length ? { id_medio_pago: bancoLote || null } : { banco_siigo: bancoLote }, 'Banco asignado')} className="shrink-0 px-2.5 py-1 rounded-lg bg-[#271a82] hover:bg-[#1c1343] text-white text-[10px] font-bold cursor-pointer disabled:opacity-50 transition">Aplicar</button>
           </div>
           {([
             ['fte', 'RteFte', rteLote, setRteLote, catalogos.retefuente, '%', 'bg-red-50 border-red-200 text-red-700'],
             ['ica', 'RteICA', icaLote, setIcaLote, catalogos.reteica, '‰', 'bg-amber-50 border-amber-200 text-amber-700'],
             ['iva', 'RteIVA', ivaLote, setIvaLote, catalogos.reteiva, '%', 'bg-indigo-50 border-indigo-200 text-indigo-700']
           ] as const).map(([tipo, etiqueta, valor, setValor, lista, unidad, clases]) => (
-            <div key={tipo} className={`flex items-center gap-1 border rounded-xl pl-2 ${clases}`}>
-              <span className="text-[10px] font-bold">{etiqueta}</span>
-              <select value={valor} onChange={e => (setValor as (v: string) => void)(e.target.value)} className="bg-transparent px-1.5 py-1.5 text-xs max-w-[170px] focus:outline-none">
+            <div key={tipo} className={`flex items-center gap-1.5 border rounded-xl p-1 pl-2.5 ${clases}`}>
+              <span className="text-[10px] font-bold shrink-0">{etiqueta}</span>
+              <select value={valor} onChange={e => (setValor as (v: string) => void)(e.target.value)} className="min-w-0 max-w-[170px] bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-800 focus:outline-none focus:border-[#271a82]">
                 <option value="">Elegir…</option>
                 {opciones(lista as OpcionImpuesto[], unidad)}
               </select>
-              <button disabled={!valor || !!ocupado} onClick={() => masivo(selectedIds, camposRetencion(tipo, valor), `${etiqueta} asignada`)} className="px-2 py-1.5 rounded-lg bg-slate-800 text-white text-[10px] font-bold cursor-pointer disabled:opacity-40">Aplicar</button>
+              <button disabled={!valor || !!ocupado} onClick={() => masivo(selectedIds, camposRetencion(tipo, valor), `${etiqueta} asignada`)} className="shrink-0 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-[10px] font-bold cursor-pointer disabled:opacity-40 transition">Aplicar</button>
             </div>
           ))}
           <div className="flex items-center gap-1 ml-auto">

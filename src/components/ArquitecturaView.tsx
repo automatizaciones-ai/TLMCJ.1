@@ -141,7 +141,10 @@ export const ArquitecturaView: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Top Banner Header */}
-      <div className="bg-gradient-to-r from-[#1c1343] via-[#271a82] to-[#4059aa] rounded-2xl p-6 text-white shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-5 border border-indigo-900/50">
+      <div
+        className="rounded-2xl p-6 text-white shadow-xl flex flex-col lg:flex-row lg:items-center justify-between gap-5 border border-white/15 transition-colors duration-200"
+        style={{ background: 'linear-gradient(135deg, var(--tlm-sidebar-bg, #1c1343) 0%, var(--tlm-primary, #271a82) 100%)' }}
+      >
         <div>
           <div className="flex items-center gap-2 mb-1.5">
             <span className="bg-[#e64519] text-white text-[11px] font-extrabold px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-xs">
