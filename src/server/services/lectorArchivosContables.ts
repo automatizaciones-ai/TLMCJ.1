@@ -8,6 +8,9 @@
  * de modo que sirven exportes de distintos ERP y bancos sin plantillas fijas.
  */
 import * as XLSX from 'xlsx';
+import { mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export interface MovimientoNormalizado {
   id: string;
@@ -51,12 +54,18 @@ export function parsearMonto(entrada: unknown): number {
     if (ultimaComa > ultimoPunto) t = t.replace(/\./g, '').replace(',', '.');
     else t = t.replace(/,/g, '');
   } else if (ultimaComa >= 0) {
+    const partes = t.split(',');
     const decimales = t.length - ultimaComa - 1;
-    t = (t.split(',').length === 2 && decimales > 0 && decimales <= 2) ? t.replace(',', '.') : t.replace(/,/g, '');
+    if (partes.length === 2 && decimales > 0 && decimales <= 2) t = t.replace(',', '.');
+    else if (partes.length > 2 && decimales > 0 && decimales <= 2 && partes.slice(1, -1).every(p => p.length === 3)) {
+      t = `${partes.slice(0, -1).join('')}.${partes.at(-1)}`;
+    } else t = t.replace(/,/g, '');
   } else if (ultimoPunto >= 0) {
     const partes = t.split('.');
     const decimales = t.length - ultimoPunto - 1;
-    if (partes.length > 2 || decimales === 3) t = t.replace(/\./g, '');
+    if (partes.length > 2 && decimales > 0 && decimales <= 2 && partes.slice(1, -1).every(p => p.length === 3)) {
+      t = `${partes.slice(0, -1).join('')}.${partes.at(-1)}`;
+    } else if (partes.length > 2 || decimales === 3) t = t.replace(/\./g, '');
   }
   const n = parseFloat(t);
   if (!Number.isFinite(n)) return 0;
@@ -293,11 +302,32 @@ const BANCOS: [RegExp, string][] = [
   [/coltefinanciera/i, 'COLTEFINANCIERA']
 ];
 
+const BANCOS_SENAL_FUERTE: [RegExp, string][] = [
+  [/davivienda\.com|banco davivienda s\.? ?a/i, 'DAVIVIENDA'],
+  [/bancolombia\.com/i, 'BANCOLOMBIA'],
+  [/bbva\.com|bbva colombia/i, 'BBVA'],
+  [/bancodebogota\.com|banco de bogot[aá] ?s\.? ?a/i, 'BANCO DE BOGOTÁ'],
+  [/bancocajasocial\.com|banco caja social nit/i, 'BANCO CAJA SOCIAL'],
+  [/global66\.com/i, 'GLOBAL66'],
+  [/bancodeoccidente\.com/i, 'BANCO DE OCCIDENTE'],
+  [/bancopopular\.com/i, 'BANCO POPULAR'],
+  [/avvillas\.com/i, 'AV VILLAS'],
+  [/scotiabankcolpatria\.com/i, 'SCOTIABANK COLPATRIA'],
+  [/itau\.co/i, 'ITAÚ'],
+  [/nequi\.com/i, 'NEQUI']
+];
+
 /**
  * Banco del extracto: el que aparece primero en el encabezado del documento.
  * (Los movimientos suelen nombrar otros bancos, p. ej. "PAGO PSE Banco Davivienda" en un extracto de Bancolombia.)
  */
 export function detectarBanco(texto: string): string | undefined {
+  let fuerte: { pos: number; banco: string } | null = null;
+  for (const [re, banco] of BANCOS_SENAL_FUERTE) {
+    const m = re.exec(texto);
+    if (m && (fuerte === null || m.index < fuerte.pos)) fuerte = { pos: m.index, banco };
+  }
+  if (fuerte) return fuerte.banco;
   let mejor: { pos: number; banco: string } | null = null;
   for (const [re, banco] of BANCOS) {
     const m = re.exec(texto);
@@ -410,13 +440,95 @@ export async function textoLineasPdf(buffer: Buffer): Promise<string[]> {
   return lineas;
 }
 
+/** Renderiza las páginas con MuPDF y recupera las columnas con OCR cuando el PDF no trae movimientos legibles. */
+async function textoLineasPdfOcr(buffer: Buffer): Promise<string[]> {
+  const [{ default: mupdf }, { createWorker, PSM }] = await Promise.all([
+    import('mupdf'),
+    import('tesseract.js')
+  ]);
+  const doc = mupdf.Document.openDocument(buffer, 'application/pdf');
+  let worker: Awaited<ReturnType<typeof createWorker>> | undefined;
+  const lineas: string[] = [];
+  try {
+    const cachePath = join(tmpdir(), 'tlm-tesseract');
+    await mkdir(cachePath, { recursive: true });
+    worker = await createWorker('spa', undefined, { cachePath });
+    await worker.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_BLOCK, preserve_interword_spaces: '1' });
+    const escala = 300 / 72;
+    for (let i = 0; i < doc.countPages(); i++) {
+      const pagina = doc.loadPage(i);
+      try {
+        const pixmap = pagina.toPixmap(mupdf.Matrix.scale(escala, escala), mupdf.ColorSpace.DeviceGray, false, true);
+        try {
+          const { data } = await worker.recognize(Buffer.from(pixmap.asPNG()), {}, { blocks: true });
+          const palabras = (data.blocks || []).flatMap(bloque =>
+            bloque.paragraphs.flatMap(parrafo =>
+              parrafo.lines.flatMap(linea => linea.words.map(palabra => ({
+                texto: palabra.text,
+                x0: palabra.bbox.x0,
+                y0: palabra.bbox.y0,
+                x1: palabra.bbox.x1,
+                y1: palabra.bbox.y1
+              })))
+            )
+          );
+          lineas.push(...lineasDesdePalabrasOcr(palabras));
+        } finally {
+          pixmap.destroy();
+        }
+      } finally {
+        pagina.destroy();
+      }
+    }
+  } finally {
+    try {
+      await worker?.terminate();
+    } finally {
+      doc.destroy();
+    }
+  }
+  return lineas;
+}
+
+export interface PalabraOcr { texto: string; x0: number; y0: number; x1: number; y1: number }
+
+export function lineasDesdePalabrasOcr(palabras: PalabraOcr[]): string[] {
+  const validas = palabras.filter(p => p.texto.trim());
+  if (!validas.length) return [];
+  const alturas = validas.map(p => p.y1 - p.y0).sort((a, b) => a - b);
+  const alto = alturas[Math.floor(alturas.length / 2)] || 12;
+  const huecoColumna = alto * 1.4;
+  const ordenadas = [...validas].sort((a, b) => (a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2 || a.x0 - b.x0);
+  const filas: { yc: number; palabras: PalabraOcr[] }[] = [];
+  for (const palabra of ordenadas) {
+    const yc = (palabra.y0 + palabra.y1) / 2;
+    const fila = filas.at(-1);
+    if (fila && Math.abs(fila.yc - yc) <= Math.max(8, (palabra.y1 - palabra.y0) * 0.6)) {
+      fila.palabras.push(palabra);
+      fila.yc = (fila.yc + yc) / 2;
+    } else filas.push({ yc, palabras: [palabra] });
+  }
+  return filas.map(fila => {
+    fila.palabras.sort((a, b) => a.x0 - b.x0);
+    const texto = fila.palabras.reduce((acumulado, palabra, i) => {
+      if (i === 0) return palabra.texto;
+      const separador = palabra.x0 - fila.palabras[i - 1].x1 > huecoColumna ? '  ' : ' ';
+      return acumulado + separador + palabra.texto;
+    }, '');
+    return texto.replace(/[|¦]/g, ' ').trim();
+  }).filter(Boolean);
+}
+
 /** Monto que aparece justo después de una etiqueta (las líneas de resumen de los extractos traen dos columnas: "SALDO ANTERIOR $ X   SALDO PROMEDIO $ Y") */
-function montoTrasEtiqueta(linea: string, etiqueta: RegExp): number | null {
+function montoTrasEtiqueta(linea: string, etiqueta: RegExp, siguienteLinea?: string): number | null {
   const m = linea.match(etiqueta);
   if (!m || m.index === undefined) return null;
   const resto = linea.substring(m.index + m[0].length);
   const monto = resto.match(/^[\s:$]*(-?\s?\$?\s?-?[\d.,]*\d-?)/);
-  return monto ? parsearMonto(monto[1]) : null;
+  if (monto) return parsearMonto(monto[1]);
+  if (!siguienteLinea || RE_FECHA_LINEA.test(siguienteLinea)) return null;
+  const montoSiguiente = siguienteLinea.trim().match(/^\$?\s*(-?\s?-?[\d.,]*\d-?)(?=\s|$)/);
+  return montoSiguiente ? parsearMonto(montoSiguiente[0]) : null;
 }
 
 const RE_MONTO = /-?\$?\s?-?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?-?|-?\$?\s?\d+(?:[.,]\d{1,2})?-?/g;
@@ -424,12 +536,12 @@ const RE_MONTO = /-?\$?\s?-?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?-?|-?\$?\s?\d+(
 const MESES_RE = '(?:ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic|jan|apr|aug|dec)[a-z.]*';
 /** Fecha al inicio de la línea en los formatos que usan los bancos colombianos */
 const RE_FECHA_LINEA = new RegExp(
-  '^\\s*(' +
+  '^\\s*(?:\\d{1,6}\\s+)?(' +
     '\\d{4}[-/.]\\d{1,2}[-/.]\\d{1,2}' +                    // 2026/06/01
     '|\\d{1,2}[-/.]\\d{1,2}(?:[-/.]\\d{2,4})?' +             // 01/06/2026 · 1/06 · 01-06
     `|\\d{1,2}[-\\s/]${MESES_RE}(?:[-\\s/]\\d{2,4})?` +       // 01 JUN 2026 · 01-JUN
     `|${MESES_RE}\\s+\\d{1,2}(?:\\s+\\d{2,4})?` +              // JUN 01
-    '|\\d{2}\\s\\d{2}(?=\\s+[$A-Za-zÁÉÍÓÚÑáéíóúñ])' +           // 01 06 DESCRIPCIÓN (Davivienda: día y mes en columnas)
+    '|\\d{2}\\s+\\d{2}(?=\\s+[$A-Za-zÁÉÍÓÚÑáéíóúñ])' +         // 01  06 DESCRIPCIÓN (Davivienda: día y mes en columnas)
   ')\\b',
   'i'
 );
@@ -453,27 +565,61 @@ function fechaPdf(texto: string, anio?: number, hasta?: { anio: number; mes: num
 
 const RE_TOKEN_MONTO = /^\(?-?\s?\$?\s?-?[\d.,]*\d\)?-?$/;
 
+function saldosDeResumenEnColumnas(lineas: string[]): { inicial: number; final: number } | null {
+  const rotulos: [string, RegExp][] = [
+    ['inicial', /saldo\s+(?:cierre\s+mes\s+anterior|mes\s+anterior|anterior|inicial)/i],
+    ['abonos', /m[aá]s\s+cr[eé]ditos|total\s+abonos|abonos|cr[eé]ditos/i],
+    ['cargos', /menos\s+d[eé]bitos|total\s+cargos|cargos|d[eé]bitos/i],
+    ['intereses', /intereses/i],
+    ['final', /nuevo\s+saldo|saldo\s+(?:final|actual)/i]
+  ];
+  for (let i = 0; i < lineas.length - 1; i++) {
+    const encabezado = lineas[i];
+    if (/\d[.,]\d{2}/.test(encabezado)) continue;
+    const columnas = rotulos
+      .map(([clave, re]) => ({ clave, pos: encabezado.search(re) }))
+      .filter(columna => columna.pos >= 0)
+      .sort((a, b) => a.pos - b.pos);
+    if (columnas.length < 3 || !columnas.some(c => c.clave === 'inicial') || !columnas.some(c => c.clave === 'final')) continue;
+    const montos = lineas[i + 1].split(/\s{2,}/).map(t => t.trim())
+      .filter(t => RE_TOKEN_MONTO.test(t.replace(/\s|\$/g, '')));
+    if (montos.length !== columnas.length) continue;
+    const monto = (clave: string) => {
+      const indice = columnas.findIndex(c => c.clave === clave);
+      return indice >= 0 ? parsearMonto(montos[indice]) : null;
+    };
+    const inicial = monto('inicial');
+    const final = monto('final');
+    if (inicial !== null && final !== null) return { inicial, final };
+  }
+  return null;
+}
+
 /** Separa los montos al final de la línea; reconoce marcas de naturaleza CR / DB y "$" sueltos. */
 function montosFinales(tokens: string[]): { montos: number[]; marca?: 1 | -1 } {
   const montos: number[] = [];
-  let marca: 1 | -1 | undefined;
+  const marcas: (1 | -1 | undefined)[] = [];
+  let marcaSuelta: 1 | -1 | undefined;
   while (tokens.length) {
     let t = tokens[tokens.length - 1].replace(/\s+/g, ' ').trim();
     if (t === '$') { tokens.pop(); continue; }
-    const conMarca = t.match(/^(.*?)\s*(CR|DB|DR|C|D|\+)$/);
+    let marcaToken: 1 | -1 | undefined;
+    const conMarca = t.match(/^(.*?)\s*(CR|DB|DR|C|D|\+|-)$/);
     if (conMarca && RE_TOKEN_MONTO.test(conMarca[1].replace(/\s/g, '')) && /[.,]/.test(conMarca[1])) {
-      if (montos.length === 0 || marca === undefined) marca = /^(CR|C|\+)$/.test(conMarca[2]) ? 1 : -1;
+      marcaToken = /^(CR|C|\+)$/.test(conMarca[2]) ? 1 : -1;
       t = conMarca[1];
     } else if (/^(CR|DB|DR)$/.test(t) && montos.length === 0) {
-      marca = t === 'CR' ? 1 : -1;
+      marcaSuelta = t === 'CR' ? 1 : -1;
       tokens.pop();
       continue;
     }
     const limpio = t.replace(/\s/g, '');
     if (!(RE_TOKEN_MONTO.test(limpio) && /[.,]/.test(limpio))) break;
     montos.unshift(parsearMonto(limpio.replace(/^\((.*)\)$/, '-$1')));
+    marcas.unshift(marcaToken);
     tokens.pop();
   }
+  const marca = marcaSuelta ?? (montos.length <= 2 ? marcas[0] : undefined);
   return { montos, marca };
 }
 
@@ -492,8 +638,14 @@ function corregirSignosConSaldo(movs: MovimientoNormalizado[], saldoInicial: num
   }
 }
 
-export async function leerExtractoPdf(buffer: Buffer, nombreArchivo: string): Promise<LecturaMovimientos> {
-  const lineas = await textoLineasPdf(buffer);
+export function interpretarLineasExtracto(lineasOriginales: string[], nombreArchivo: string, desdeOcr = false): LecturaMovimientos {
+  const lineas = desdeOcr
+    ? lineasOriginales.map(linea => linea
+      .replace(/(\d),\s(\d{3})(?=[\d,.]|\s|$)/g, '$1,$2')
+      .replace(/(\d)\s,(\d{3})/g, '$1,$2')
+      .replace(/(\d)\s\.(\d{2})(?=\s|$)/g, '$1.$2')
+      .replace(/(\d{1,3}(?:,\d{3})+),(\d{2})(?=\s|$)/g, '$1.$2'))
+    : lineasOriginales;
   const textoCompleto = lineas.join('\n');
   const advertencias: string[] = [];
   const anio = Number((textoCompleto.match(/(?:periodo|desde|hasta|fecha de corte|corte)[^\n]*?(20\d{2})/i) || textoCompleto.match(/\b(20\d{2})\b/) || [])[1]) || undefined;
@@ -503,15 +655,24 @@ export async function leerExtractoPdf(buffer: Buffer, nombreArchivo: string): Pr
   let saldoInicial: number | null = null;
   let saldoFinal: number | null = null;
   let movs: MovimientoNormalizado[] = [];
+  const resumen = saldosDeResumenEnColumnas(lineas);
+  if (resumen) {
+    saldoInicial = resumen.inicial;
+    saldoFinal = resumen.final;
+  }
 
-  for (const linea of lineas) {
+  for (let i = 0; i < lineas.length; i++) {
+    const fechaNum = '\\d{1,2}[-/.]\\d{1,2}[-/.]\\d{2,4}';
+    const linea = lineas[i]
+      .replace(new RegExp(`^.{0,10}?\\b\\d{3,9}\\s+(?=${fechaNum}\\s+${fechaNum}\\b)`), '')
+      .replace(new RegExp(`^\\s*\\d{3,9}\\s+(?=${fechaNum}\\b)`), '');
     const norm = normalizarTexto(linea);
-    if (saldoInicial === null && /saldo (anterior|inicial)/.test(norm)) {
-      const v = montoTrasEtiqueta(linea, /saldo\s+(anterior|inicial)/i);
+    if (saldoInicial === null && /saldo (cierre mes anterior|mes anterior|anterior|inicial)/.test(norm)) {
+      const v = montoTrasEtiqueta(linea, /saldo\s+(cierre\s+mes\s+anterior|mes\s+anterior|anterior|inicial)/i, lineas[i + 1]);
       if (v !== null) { saldoInicial = v; continue; }
     }
     if (saldoFinal === null && /saldo (actual|final|nuevo)|nuevo saldo/.test(norm)) {
-      const v = montoTrasEtiqueta(linea, /saldo\s+(actual|final|nuevo)|nuevo\s+saldo/i);
+      const v = montoTrasEtiqueta(linea, /saldo\s+(actual|final|nuevo)|nuevo\s+saldo/i, lineas[i + 1]);
       if (v !== null) { saldoFinal = v; continue; }
     }
     const mFecha = linea.match(RE_FECHA_LINEA);
@@ -559,7 +720,7 @@ export async function leerExtractoPdf(buffer: Buffer, nombreArchivo: string): Pr
   }
 
   if (movs.length === 0) {
-    advertencias.push('No se reconocieron movimientos en el PDF. Si es un PDF escaneado (imagen), descargue el extracto en Excel/CSV desde la banca en línea o conviértalo con OCR.');
+    advertencias.push('No se reconocieron movimientos en el PDF. Revise que las filas del extracto tengan fechas y valores legibles.');
   } else {
     if (saldoInicial === null) {
       const primero = movs.find(m => m.saldo !== undefined);
@@ -569,15 +730,40 @@ export async function leerExtractoPdf(buffer: Buffer, nombreArchivo: string): Pr
         // Saldo inicial deducido del primer saldo impreso (se prueban ambos signos del primer movimiento)
         const candidato = primero.saldo! - primero.valor - antes;
         const alterno = primero.saldo! + primero.valor - antes;
-        saldoInicial = movs.every(m => m.valor > 0) ? Math.min(candidato, alterno) : candidato;
+        saldoInicial = movs.every(m => m.valor > 0) && PALABRAS_SALIDA.test(normalizarTexto(primero.descripcion))
+          ? alterno
+          : candidato;
       }
     }
     if (movs.some(m => m.saldo !== undefined)) corregirSignosConSaldo(movs, saldoInicial);
     else if (movs.every(m => m.valor > 0)) inferirSignos(movs, saldoInicial);
   }
   const resultado = calcularResumen(movs, saldoInicial, saldoFinal, advertencias);
-  resultado.banco_detectado = detectarBanco(textoCompleto.substring(0, 3000) + ' ' + nombreArchivo);
+  resultado.banco_detectado = detectarBanco(`${textoCompleto}\n${nombreArchivo}`);
   return resultado;
+}
+
+export async function leerExtractoPdf(buffer: Buffer, nombreArchivo: string): Promise<LecturaMovimientos> {
+  const lineas = await textoLineasPdf(buffer);
+  const lecturaTexto = interpretarLineasExtracto(lineas, nombreArchivo);
+  if (lecturaTexto.movimientos.length > 0) return lecturaTexto;
+  if (lineas.join('').replace(/\s/g, '').length >= 300) return lecturaTexto;
+
+  let lineasOcr: string[];
+  try {
+    lineasOcr = await textoLineasPdfOcr(buffer);
+  } catch (error) {
+    const detalle = error instanceof Error ? error.message : String(error);
+    lecturaTexto.advertencias.push(`No se pudo leer el PDF con OCR: ${detalle}. Si falta alguna dependencia, ejecute npm install tesseract.js mupdf; también puede descargar el extracto en Excel/CSV.`);
+    return lecturaTexto;
+  }
+  const lecturaOcr = interpretarLineasExtracto(lineasOcr, nombreArchivo, true);
+  if (lecturaOcr.movimientos.length > 0) {
+    lecturaOcr.advertencias.unshift('El PDF es una imagen (sin texto legible); se procesó mediante OCR. Verifique que el saldo final coincida con el reportado por el banco.');
+    return lecturaOcr;
+  }
+  lecturaTexto.advertencias.push('Se intentó leer el PDF con OCR, pero no se reconocieron movimientos. Descargue el extracto en Excel/CSV desde la banca en línea.');
+  return lecturaTexto;
 }
 
 export async function leerExtracto(buffer: Buffer, nombreArchivo: string): Promise<LecturaMovimientos> {
