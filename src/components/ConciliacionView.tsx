@@ -78,6 +78,23 @@ const PARAMETROS_DEFECTO = {
 
 const BANCOS = BANCOS_EXTRACTO;
 
+const ArchivoInput: React.FC<{
+  etiqueta: string;
+  archivo: File | null;
+  previo?: string;
+  accept: string;
+  onChange: (f: File | null) => void;
+}> = ({ etiqueta, archivo, previo, accept, onChange }) => (
+  <div className="flex-1 min-w-[260px]">
+    <div className="text-[10px] font-bold uppercase text-slate-500 mb-1">{etiqueta}</div>
+    <label className="relative flex items-center gap-2 bg-[#f8f9fa] border border-slate-200 rounded-xl px-2 py-1.5 cursor-pointer hover:border-[#271a82]">
+      <span className="px-2.5 py-1 rounded-lg bg-indigo-50 text-[#271a82] text-[11px] font-bold shrink-0">Seleccionar archivo</span>
+      <span className="text-[11px] text-slate-600 truncate">{archivo?.name || (previo ? `${previo} (cargado)` : 'Ningún archivo seleccionado')}</span>
+      <input type="file" accept={accept} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={e => { const f = e.currentTarget.files?.[0] || null; onChange(f); e.currentTarget.value = ''; }} />
+    </label>
+  </div>
+);
+
 export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, onShowToast }) => {
   const avisar = (m: string, t: 'success' | 'info' | 'error' = 'success') => (onShowToast ? onShowToast(m, t) : alert(m));
   const [auxiliar, setAuxiliar] = useState<File | null>(null);
@@ -203,17 +220,6 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
   const visiblesLibros = useMemo(() => (resultado?.faltan_en_libros || []).filter(m => coincide(m.fecha, m.descripcion, m.comprobante, m.tercero, m.valor)), [resultado, textoFiltro, fechaFiltro]);
   const todasSel = visiblesLibros.length > 0 && visiblesLibros.every(m => seleccion.includes(m.id));
   const totalSel = useMemo(() => (resultado?.faltan_en_libros || []).filter(m => seleccion.includes(m.id)).reduce((s, m) => s + m.valor, 0), [resultado, seleccion]);
-
-  const ArchivoInput: React.FC<{ etiqueta: string; archivo: File | null; previo?: string; accept: string; onChange: (f: File | null) => void }> = ({ etiqueta, archivo, previo, accept, onChange }) => (
-    <div className="flex-1 min-w-[260px]">
-      <div className="text-[10px] font-bold uppercase text-slate-500 mb-1">{etiqueta}</div>
-      <label className="flex items-center gap-2 bg-[#f8f9fa] border border-slate-200 rounded-xl px-2 py-1.5 cursor-pointer hover:border-[#271a82]">
-        <span className="px-2.5 py-1 rounded-lg bg-indigo-50 text-[#271a82] text-[11px] font-bold shrink-0">Seleccionar archivo</span>
-        <span className="text-[11px] text-slate-600 truncate">{archivo?.name || (previo ? `${previo} (cargado)` : 'Ningún archivo seleccionado')}</span>
-        <input type="file" accept={accept} className="hidden" onChange={e => { onChange(e.target.files?.[0] || null); e.target.value = ''; }} />
-      </label>
-    </div>
-  );
 
   const Tarjeta: React.FC<{ titulo: string; icono: React.ReactNode; b: Bloque; color: string; etiqueta: string }> = ({ titulo, icono, b, color, etiqueta }) => (
     <div className={`bg-white rounded-2xl border border-slate-200 shadow-xs p-4 border-l-4 ${color}`}>
