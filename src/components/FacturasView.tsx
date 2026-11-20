@@ -631,22 +631,22 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
                       <td colSpan={3} className="py-2.5 px-2 text-[10px] text-slate-400">Retenciones no aplican en ventas</td>
                     ) : (
                       <>
-                        <td className="py-2.5 px-2">
-                          <select value={valorRetencion(f, 'fte')} onChange={e => masivo([f.id_factura], camposRetencion('fte', e.target.value))} className="border border-red-200 rounded px-1 py-1 text-[11px] font-bold text-red-700 bg-red-50/80 max-w-[150px]">
+                        <td className="py-2.5 px-2 align-top">
+                          <select value={valorRetencion(f, 'fte')} onChange={e => masivo([f.id_factura], camposRetencion('fte', e.target.value))} className="w-[150px] h-7 border border-red-200 rounded px-1.5 text-[11px] font-bold text-red-700 bg-red-50/80">
                             <option value="">Sin Retención (0%)</option>
                             {opciones(catalogos.retefuente.filter(o => Number(o.percentage) > 0), '%')}
                           </select>
                           {f.retencion_valor ? <div className="text-[10px] text-red-700 mt-0.5">-{formatCOP(Math.abs(f.retencion_valor))}</div> : null}
                         </td>
-                        <td className="py-2.5 px-2">
-                          <select value={valorRetencion(f, 'ica')} onChange={e => masivo([f.id_factura], camposRetencion('ica', e.target.value))} className="border border-amber-200 rounded px-1 py-1 text-[11px] font-bold text-amber-700 bg-amber-50/80 max-w-[150px]">
+                        <td className="py-2.5 px-2 align-top">
+                          <select value={valorRetencion(f, 'ica')} onChange={e => masivo([f.id_factura], camposRetencion('ica', e.target.value))} className="w-[150px] h-7 border border-amber-200 rounded px-1.5 text-[11px] font-bold text-amber-700 bg-amber-50/80">
                             <option value="">Sin ReteICA (0‰)</option>
                             {opciones(catalogos.reteica.filter(o => Number(o.percentage) > 0), '‰')}
                           </select>
                           {(f.reteica_tarifa || 0) > 0 && <div className="text-[10px] text-amber-700 mt-0.5">-{formatCOP(Math.abs(f.subtotal) * (f.reteica_tarifa || 0) / 1000)}</div>}
                         </td>
-                        <td className="py-2.5 px-2">
-                          <select value={valorRetencion(f, 'iva')} onChange={e => masivo([f.id_factura], camposRetencion('iva', e.target.value))} className="border border-indigo-200 rounded px-1 py-1 text-[11px] font-bold text-indigo-700 bg-indigo-50/80 max-w-[150px]">
+                        <td className="py-2.5 px-2 align-top">
+                          <select value={valorRetencion(f, 'iva')} onChange={e => masivo([f.id_factura], camposRetencion('iva', e.target.value))} className="w-[150px] h-7 border border-indigo-200 rounded px-1.5 text-[11px] font-bold text-indigo-700 bg-indigo-50/80">
                             <option value="">Sin ReteIVA (0%)</option>
                             {opciones(catalogos.reteiva.filter(o => Number(o.percentage) > 0), '%')}
                           </select>
