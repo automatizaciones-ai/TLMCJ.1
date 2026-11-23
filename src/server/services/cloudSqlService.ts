@@ -64,6 +64,47 @@ export function mapFacturaRow(r: any): Factura {
   };
 }
 
+function valoresFactura(data: Partial<Factura>): typeof schema.facturas.$inferInsert {
+  const subtotal = Number(data.subtotal || 0);
+  const iva = Number(data.iva || 0);
+  const retencionValor = Number(data.retencion_valor || 0);
+  return {
+    idEmpresa: data.id_empresa || 1,
+    facturaNum: data.factura_num || `SN-${Date.now()}`,
+    proveedor: data.proveedor || 'Tercero no identificado',
+    nitTercero: data.nit_tercero || 'N/A',
+    fecha: data.fecha || 'SIN_FECHA',
+    fechaVencimiento: data.fecha_vencimiento || null,
+    tipoComprobante: data.tipo_comprobante || 'Factura Electrónica',
+    descripcionItem: data.descripcion_item || 'Bienes o servicios',
+    cantidad: String(data.cantidad || 1),
+    valorUnitario: String(data.valor_unitario ?? subtotal),
+    subtotal: String(subtotal),
+    iva: String(iva),
+    retencionPorc: String(data.retencion_porc || 0),
+    retencionValor: String(retencionValor),
+    total: String(data.total ?? (subtotal + iva - retencionValor)),
+    estadoRevision: data.estado_revision || 'PENDIENTE',
+    cufeHash: data.cufe_hash || `cufe-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+    casilla350: data.casilla_350 || 83,
+    formaPago: data.forma_pago || 'Crédito',
+    medioPago: data.medio_pago || 'Transferencia Débito',
+    cuentaGasto: data.cuenta_gasto || '513535',
+    fechaCargue: data.fecha_cargue || new Date().toISOString(),
+    tipoOperacion: data.tipo_operacion || 'COMPRA',
+    telefono: data.telefono || null,
+    direccion: data.direccion || null,
+    ciudad: data.ciudad || null,
+    departamento: data.departamento || null,
+    correo: data.correo || null,
+    reteicaTarifa: String(data.reteica_tarifa || 0),
+    reteivaPorc: String(data.reteiva_porc || 0),
+    bancoSiigo: data.banco_siigo || null,
+    items: data.items || null,
+    datosUbl: data.datos_ubl || null,
+  };
+}
+
 export class CloudSqlService {
   private static isInitialized = false;
 
@@ -799,18 +840,66 @@ export class CloudSqlService {
 
     const entradas = [...grupos.values()];
     const results: (Factura | undefined)[] = new Array(facturas.length);
-    const concurrencia = 5;
 
-    for (let inicio = 0; inicio < entradas.length; inicio += concurrencia) {
-      await Promise.all(entradas.slice(inicio, inicio + concurrencia).map(async grupo => {
-        for (const { factura, indice } of grupo) {
+    for (let inicio = 0; inicio < entradas.length; inicio += 100) {
+      const lote = entradas.slice(inicio, inicio + 100);
+      const porEmpresa = new Map<number, string[]>();
+      for (const grupo of lote) {
+        const cufe = grupo[0].factura.cufe_hash;
+        if (!cufe || grupo.length > 1) continue;
+        const idEmpresa = grupo[0].factura.id_empresa || 1;
+        const cufes = porEmpresa.get(idEmpresa) || [];
+        cufes.push(cufe);
+        porEmpresa.set(idEmpresa, cufes);
+      }
+
+      const existentes = new Set<string>();
+      for (const [idEmpresa, cufes] of porEmpresa) {
+        const rows = await drizzleDb.select({ cufeHash: schema.facturas.cufeHash })
+          .from(schema.facturas)
+          .where(and(eq(schema.facturas.idEmpresa, idEmpresa), inArray(schema.facturas.cufeHash, cufes)));
+        for (const row of rows) existentes.add(`${idEmpresa}|${row.cufeHash}`);
+      }
+
+      const nuevas: { factura: Partial<Factura>; indice: number }[] = [];
+      for (const grupo of lote) {
+        const { factura, indice } = grupo[0];
+        const clave = factura.cufe_hash ? `${factura.id_empresa || 1}|${factura.cufe_hash}` : '';
+        if (grupo.length === 1 && factura.cufe_hash && !existentes.has(clave)) {
+          nuevas.push({ factura, indice });
+          continue;
+        }
+
+        for (const entrada of grupo) {
           try {
-            results[indice] = await this.createFactura(factura);
+            results[entrada.indice] = await this.createFactura(entrada.factura);
           } catch (err) {
-            console.warn('[CloudSQL] Error creating invoice in bulk:', factura.factura_num, err);
+            console.warn('[CloudSQL] Error creating invoice in bulk:', entrada.factura.factura_num, err);
           }
         }
-      }));
+      }
+
+      for (let i = 0; i < nuevas.length; i += 100) {
+        const bloque = nuevas.slice(i, i + 100);
+        try {
+          const rows = await drizzleDb.insert(schema.facturas)
+            .values(bloque.map(({ factura }) => valoresFactura(factura)))
+            .returning();
+          for (const row of rows) {
+            const indice = bloque.find(entrada => entrada.factura.cufe_hash === row.cufeHash)?.indice;
+            if (indice !== undefined) results[indice] = mapFacturaRow(row);
+          }
+        } catch (err) {
+          console.warn('[CloudSQL] Bulk insert failed; retrying invoices individually:', err);
+          for (const entrada of bloque) {
+            try {
+              results[entrada.indice] = await this.createFactura(entrada.factura);
+            } catch (individualError) {
+              console.warn('[CloudSQL] Error creating invoice in bulk:', entrada.factura.factura_num, individualError);
+            }
+          }
+        }
+      }
     }
 
     return results.filter((factura): factura is Factura => factura !== undefined);
@@ -818,48 +907,8 @@ export class CloudSqlService {
 
   public static async createFactura(data: Partial<Factura>): Promise<Factura> {
     try {
-      const subtotal = Number(data.subtotal || 0);
-      const iva = Number(data.iva || 0);
-      const retencionValor = Number(data.retencion_valor || 0);
-      const total = Number(data.total ?? (subtotal + iva - retencionValor));
-      const cufeHash = data.cufe_hash || `cufe-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
       const idEmpresa = data.id_empresa || 1;
-
-      const valores = {
-        idEmpresa,
-        facturaNum: data.factura_num || `SN-${Date.now()}`,
-        proveedor: data.proveedor || 'Tercero no identificado',
-        nitTercero: data.nit_tercero || 'N/A',
-        fecha: data.fecha || 'SIN_FECHA',
-        fechaVencimiento: data.fecha_vencimiento || null,
-        tipoComprobante: data.tipo_comprobante || 'Factura Electrónica',
-        descripcionItem: data.descripcion_item || 'Bienes o servicios',
-        cantidad: String(data.cantidad || 1),
-        valorUnitario: String(data.valor_unitario ?? subtotal),
-        subtotal: String(subtotal),
-        iva: String(iva),
-        retencionPorc: String(data.retencion_porc || 0),
-        retencionValor: String(retencionValor),
-        total: String(total),
-        estadoRevision: data.estado_revision || 'PENDIENTE',
-        cufeHash,
-        casilla350: data.casilla_350 || 83,
-        formaPago: data.forma_pago || 'Crédito',
-        medioPago: data.medio_pago || 'Transferencia Débito',
-        cuentaGasto: data.cuenta_gasto || '513535',
-        fechaCargue: data.fecha_cargue || new Date().toISOString(),
-        tipoOperacion: data.tipo_operacion || 'COMPRA',
-        telefono: data.telefono || null,
-        direccion: data.direccion || null,
-        ciudad: data.ciudad || null,
-        departamento: data.departamento || null,
-        correo: data.correo || null,
-        reteicaTarifa: String(data.reteica_tarifa || 0),
-        reteivaPorc: String(data.reteiva_porc || 0),
-        bancoSiigo: data.banco_siigo || null,
-        items: (data.items as any) || null,
-        datosUbl: (data.datos_ubl as any) || null,
-      };
+      const valores = valoresFactura(data);
 
       // Deduplicación por CUFE dentro de la misma empresa (cada empresa conserva su propia copia)
       if (data.cufe_hash) {

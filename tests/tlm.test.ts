@@ -353,9 +353,9 @@ describe('empresas', () => {
 });
 
 describe('facturas XML (UBL)', () => {
-  test('lee más de 100 XML y ZIP anidado sin límite fijo, incluidas notas crédito', async () => {
+  test('procesa 343 XML de un ZIP anidado, incluidas notas crédito', async () => {
     const zip = new JSZip();
-    for (let i = 1; i <= 120; i++) {
+    for (let i = 1; i <= 343; i++) {
       zip.file(`documentos/FE-${i}.xml`, xmlFactura(`FE-ZIP-${i}`, [1000], { root: i === 120 ? 'CreditNote' : 'Invoice' }));
     }
 
@@ -371,9 +371,10 @@ describe('facturas XML (UBL)', () => {
 
     const { xmlParser } = await import('../src/server/services/xmlUblParser.ts');
     const rutaZip = path.join(workDir, 'lote-masivo.zip');
-    fs.writeFileSync(rutaZip, await zip.generateAsync({ type: 'nodebuffer' }));
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+    fs.writeFileSync(rutaZip, zipBuffer);
     const documentos = await xmlParser.parseFilePath(rutaZip, 'lote-masivo.zip');
-    expect(documentos).toHaveLength(121);
+    expect(documentos).toHaveLength(344);
     expect(documentos.find(d => d.factura_num === 'FE-ZIP-120')?.tipo_comprobante).toBe('Nota de Crédito');
     expect(documentos.some(d => d.factura_num === 'FE-ZIP-ANIDADA')).toBe(true);
   });
