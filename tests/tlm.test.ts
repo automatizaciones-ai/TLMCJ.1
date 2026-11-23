@@ -136,12 +136,14 @@ const codigoDe = (correo: string) => {
   return m[1];
 };
 
-const xmlFactura = (num: string, lineas: number[], opts: { root?: string; descripcion?: string; nit?: string } = {}) => {
+const xmlFactura = (num: string, lineas: number[], opts: { root?: 'Invoice' | 'CreditNote' | 'DebitNote'; descripcion?: string; nit?: string } = {}) => {
   const root = opts.root || 'Invoice';
+  const nombreLinea = root === 'CreditNote' ? 'CreditNoteLine' : root === 'DebitNote' ? 'DebitNoteLine' : 'InvoiceLine';
+  const nombreCantidad = root === 'CreditNote' ? 'CreditedQuantity' : root === 'DebitNote' ? 'DebitedQuantity' : 'InvoicedQuantity';
   const subtotal = lineas.reduce((a, b) => a + b, 0);
   const lines = lineas.map((v, i) => `
-  <cac:InvoiceLine><cbc:ID>${i + 1}</cbc:ID><cbc:LineExtensionAmount currencyID="COP">${v}</cbc:LineExtensionAmount>
-    <cac:Item><cbc:Description>${opts.descripcion || 'Servicio de mantenimiento'} ${i + 1}</cbc:Description></cac:Item></cac:InvoiceLine>`).join('');
+  <cac:${nombreLinea}><cbc:ID>${i + 1}</cbc:ID><cbc:${nombreCantidad} unitCode="EA">1</cbc:${nombreCantidad}><cbc:LineExtensionAmount currencyID="COP">${v}</cbc:LineExtensionAmount>
+    <cac:Item><cbc:Description>${opts.descripcion || 'Servicio de mantenimiento'} ${i + 1}</cbc:Description></cac:Item></cac:${nombreLinea}>`).join('');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <${root} xmlns="urn:oasis:names:specification:ubl:schema:xsd:${root}-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
   <cbc:ID>${num}</cbc:ID>
@@ -482,6 +484,46 @@ describe('empresas', () => {
 });
 
 describe('carga de facturas XML, PDF y ZIP', () => {
+  test('interpreta notas débito UBL y adjuntas como documentos válidos', async () => {
+    const { xmlParser } = await import('../src/server/services/xmlUblParser.ts');
+    const notaDebito = xmlFactura('ND-UBL-1', [2500], { root: 'DebitNote' });
+    const [documento] = xmlParser.parseXmlUbl(notaDebito, 'ND-UBL-1.xml');
+    expect(documento?.tipo_comprobante).toBe('Nota Débito');
+    expect(documento?.subtotal).toBe(2500);
+    expect(documento?.items[0]?.cantidad).toBe(1);
+
+    const adjunto = xmlParser.parseXmlUbl(`<AttachedDocument><![CDATA[${notaDebito}]]></AttachedDocument>`, 'ND-adjunta.xml');
+    expect(adjunto).toHaveLength(1);
+    expect(adjunto[0].tipo_comprobante).toBe('Nota Débito');
+
+    const zip = new JSZip();
+    zip.file('ND-UBL-1.xml', notaDebito);
+    const errores: { nombre: string; error: string }[] = [];
+    const rutaZip = path.join(workDir, 'ND-UBL-1.zip');
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+    fs.writeFileSync(rutaZip, zipBuffer);
+    const documentos = await xmlParser.parseFilePath(rutaZip, 'ND-UBL-1.zip', '', errores);
+    expect(documentos).toHaveLength(1);
+    expect(errores).toHaveLength(0);
+
+    const login = await loginCon('automatizaciones@tlm.net.co', 'admin_hashed_token');
+    expect(login.status).toBe(200);
+    const subirZip = () => {
+      const form = new FormData();
+      form.append('id_empresa', '1');
+      form.append('archivos', new Blob([zipBuffer], { type: 'application/zip' }), 'ND-UBL-1.zip');
+      return api('/facturas/upload', { method: 'POST', form, cookie: login.cookie });
+    };
+    for (let intento = 0; intento < 2; intento++) {
+      const resultado = await subirZip();
+      expect(resultado.status).toBe(200);
+      expect(resultado.json.errores_lectura).toHaveLength(0);
+      expect(resultado.json.facturas[0]?.tipo_comprobante).toBe('Nota Débito');
+    }
+    const lista = await api('/facturas?id_empresa=1', { cookie: login.cookie });
+    expect(lista.json.filter((factura: any) => factura.cufe_hash === documento.cufe_hash)).toHaveLength(1);
+  });
+
   test('procesa 343 XML de un ZIP anidado, incluidas notas crédito', async () => {
     const zip = new JSZip();
     for (let i = 1; i <= 343; i++) {

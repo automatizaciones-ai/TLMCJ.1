@@ -1955,7 +1955,7 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
       console.error(`[Upload] No se pudo leer "${file.originalname}":`, err);
     }
     if (!errorLectura && !esPdf && parsedList.length === 0 && !erroresArchivo.length) {
-      errorLectura = 'No se encontró una factura o nota crédito UBL válida en el XML/ZIP.';
+      errorLectura = 'No se encontró una factura, nota crédito o nota débito UBL válida en el XML/ZIP.';
     }
     erroresLectura.push(...erroresArchivo.map(error => ({
       nombre: error.nombre,
@@ -1996,7 +1996,7 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
   for (const pdf of pdfsSinPareja) {
     try {
       const parsedList = await xmlParser.parseFileBuffer(pdf.contenido, pdf.nombre, nitEmpresa);
-      if (!parsedList.length) throw new Error('No se pudo identificar una factura o nota crédito en el PDF.');
+      if (!parsedList.length) throw new Error('No se pudo identificar una factura, nota crédito o nota débito en el PDF.');
       conPdf.push(...parsedList);
       archivosXmlExtraidos += parsedList.length;
       parsedList.forEach(agregarFactura);
