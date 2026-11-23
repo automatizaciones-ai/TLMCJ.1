@@ -22,6 +22,62 @@ import { AuthModal } from './components/AuthModal.tsx';
 import { TlmLogo } from './components/TlmLogo.tsx';
 import { Empresa, Usuario, PermisosUsuario, Factura, CuentaPUC, BalanceTercero, F350Report, ConciliacionSummary } from './types/index.ts';
 
+const MAX_ARCHIVOS_POR_LOTE = 25;
+const MAX_BYTES_POR_LOTE = 20 * 1024 * 1024;
+const MAX_BYTES_POR_GRUPO = 50 * 1024 * 1024;
+type ResultadoCargaLote = {
+  detail?: string;
+  archivos_procesados?: number;
+  xmls_extraidos?: number;
+  facturas_creadas?: number;
+  facturas_duplicadas?: number;
+  facturas_nuevas?: number;
+  pdfs_originales?: number;
+  ventas?: number;
+  compras?: number;
+  archivados?: { ok: boolean }[];
+};
+
+function crearLotesArchivos(files: FileList): File[][] {
+  const grupos = new Map<string, File[]>();
+  for (const file of Array.from(files)) {
+    const nombreBase = file.name.toLowerCase().replace(/\.[^.]+$/, '').replace(/[^a-z0-9]/g, '');
+    const grupo = grupos.get(nombreBase) || [];
+    grupo.push(file);
+    grupos.set(nombreBase, grupo);
+  }
+
+  const lotes: File[][] = [];
+  let lote: File[] = [];
+  let bytesLote = 0;
+  const guardarLote = () => {
+    if (lote.length) lotes.push(lote);
+    lote = [];
+    bytesLote = 0;
+  };
+
+  for (const grupo of grupos.values()) {
+    const bytesGrupo = grupo.reduce((total, file) => total + file.size, 0);
+    if (grupo.length <= MAX_ARCHIVOS_POR_LOTE && bytesGrupo <= MAX_BYTES_POR_GRUPO) {
+      if (lote.length && (lote.length + grupo.length > MAX_ARCHIVOS_POR_LOTE || bytesLote + bytesGrupo > MAX_BYTES_POR_LOTE)) {
+        guardarLote();
+      }
+      lote.push(...grupo);
+      bytesLote += bytesGrupo;
+      continue;
+    }
+
+    guardarLote();
+    for (const file of grupo) {
+      if (lote.length && (lote.length >= MAX_ARCHIVOS_POR_LOTE || bytesLote + file.size > MAX_BYTES_POR_LOTE)) guardarLote();
+      lote.push(file);
+      bytesLote += file.size;
+    }
+  }
+  guardarLote();
+  return lotes;
+}
+
 export default function App() {
   const [currentSection, setCurrentSection] = useState<string>('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
@@ -330,38 +386,75 @@ export default function App() {
 
   // Actions
   const handleUploadXml = async (files: FileList): Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number }> => {
-    const formData = new FormData();
-    formData.append('id_empresa', (activeEmpresa?.id_empresa || 1).toString());
-    for (let i = 0; i < files.length; i++) {
-      formData.append('archivos', files[i]);
-    }
-
+    let archivosConfirmados = 0;
     try {
-      const res = await fetch('/api/v1/facturas/upload', {
-        method: 'POST',
-        headers: { 'x-tlm-user-id': String(currentUser?.id_usuario || '') },
-        body: formData
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Error procesando los archivos.');
-      if (data.facturas_creadas > 0) {
-        const fallos = (data.archivados || []).filter((a: any) => !a.ok).length;
-        showToast(`Se procesaron ${data.archivos_procesados} archivo(s): ${data.facturas_creadas} facturas (${data.ventas ?? 0} ventas, ${data.compras ?? 0} compras)${fallos ? `. ${fallos} original(es) no se pudieron guardar en la carpeta de la empresa` : '. Originales guardados en la carpeta de la empresa'}.`, fallos ? 'info' : 'success');
+      const lotes = crearLotesArchivos(files);
+      const total = {
+        archivos_procesados: 0,
+        xmls_extraidos: 0,
+        facturas_creadas: 0,
+        facturas_duplicadas: 0,
+        facturas_nuevas: 0,
+        pdfs_originales: 0,
+        ventas: 0,
+        compras: 0,
+        fallos_archivado: 0
+      };
+
+      for (let i = 0; i < lotes.length; i++) {
+        const lote = lotes[i];
+        const formData = new FormData();
+        formData.append('id_empresa', (activeEmpresa?.id_empresa || 1).toString());
+        lote.forEach(file => formData.append('archivos', file));
+
+        const res = await fetch('/api/v1/facturas/upload', {
+          method: 'POST',
+          headers: { 'x-tlm-user-id': String(currentUser?.id_usuario || '') },
+          body: formData
+        });
+        const responseText = await res.text();
+        let data: ResultadoCargaLote;
+        try {
+          data = JSON.parse(responseText) as ResultadoCargaLote;
+        } catch {
+          data = {};
+        }
+
+        if (!res.ok) throw new Error(data.detail || `El servidor respondió con error ${res.status}.`);
+        const procesados = Number(data.archivos_procesados ?? 0);
+        if (procesados !== lote.length) {
+          throw new Error(`El servidor recibió ${procesados} de ${lote.length} archivo(s) de este lote.`);
+        }
+
+        total.archivos_procesados += procesados;
+        archivosConfirmados += procesados;
+        total.xmls_extraidos += Number(data.xmls_extraidos ?? 0);
+        total.facturas_creadas += Number(data.facturas_creadas ?? 0);
+        total.facturas_duplicadas += Number(data.facturas_duplicadas ?? 0);
+        total.facturas_nuevas += Number(data.facturas_nuevas ?? 0);
+        total.pdfs_originales += Number(data.pdfs_originales ?? 0);
+        total.ventas += Number(data.ventas ?? 0);
+        total.compras += Number(data.compras ?? 0);
+        total.fallos_archivado += (data.archivados || []).filter((a: any) => !a.ok).length;
+      }
+
+      if (total.archivos_procesados !== files.length) {
+        throw new Error(`Se procesaron ${total.archivos_procesados} de ${files.length} archivos.`);
+      }
+
+      if (total.facturas_creadas > 0) {
+        showToast(`Se procesaron ${total.archivos_procesados} archivo(s): ${total.facturas_creadas} facturas (${total.ventas} ventas, ${total.compras} compras)${total.fallos_archivado ? `. ${total.fallos_archivado} original(es) no se pudieron guardar en la carpeta de la empresa` : '. Originales guardados en la carpeta de la empresa'}.`, total.fallos_archivado ? 'info' : 'success');
       } else {
-        showToast(`Se procesaron ${data.archivos_procesados} archivo(s), pero no se detectaron nuevas facturas válidas.`, 'info');
+        showToast(`Se procesaron ${total.archivos_procesados} archivo(s), pero no se detectaron nuevas facturas válidas.`, 'info');
       }
       await loadData();
       return {
-        archivos_procesados: Number(data.archivos_procesados || files.length),
-        xmls_extraidos: Number(data.xmls_extraidos || data.facturas_creadas || 0),
-        facturas_creadas: Number(data.facturas_creadas || 0),
-        facturas_duplicadas: Number(data.facturas_duplicadas || 0),
-        facturas_nuevas: Number(data.facturas_nuevas ?? data.facturas_creadas ?? 0),
-        pdfs_originales: Number(data.pdfs_originales || 0)
+        ...total
       };
     } catch (err) {
-      showToast('Error procesando archivos XML / ZIP.', 'error');
-      throw err;
+      const detalle = err instanceof Error ? err.message : 'Error desconocido.';
+      showToast(`Error procesando archivos XML / ZIP (${archivosConfirmados} de ${files.length} confirmados): ${detalle}`, 'error');
+      throw err instanceof Error ? err : new Error(detalle);
     }
   };
 
