@@ -38,6 +38,8 @@ type ResultadoCargaLote = {
   archivados?: { ok: boolean }[];
 };
 
+type ErrorCarga = Error & { retryable?: boolean };
+
 function crearLotesArchivos(files: File[]): File[][] {
   const grupos = new Map<string, File[]>();
   for (const file of files) {
@@ -388,6 +390,7 @@ export default function App() {
   const handleUploadXml = async (files: FileList): Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number }> => {
     const archivos = Array.from(files);
     let archivosConfirmados = 0;
+    const archivosFallidos: { nombre: string; error: string }[] = [];
     try {
       const lotes = crearLotesArchivos(archivos);
       const total = {
@@ -402,48 +405,69 @@ export default function App() {
         fallos_archivado: 0
       };
 
-      for (let i = 0; i < lotes.length; i++) {
-        const lote = lotes[i];
+      const enviarLote = async (lote: File[]): Promise<void> => {
         const formData = new FormData();
         formData.append('id_empresa', (activeEmpresa?.id_empresa || 1).toString());
         lote.forEach(file => formData.append('archivos', file));
 
-        const res = await fetch('/api/v1/facturas/upload', {
-          method: 'POST',
-          headers: { 'x-tlm-user-id': String(currentUser?.id_usuario || '') },
-          body: formData
-        });
-        const responseText = await res.text();
-        let data: ResultadoCargaLote;
         try {
-          data = JSON.parse(responseText) as ResultadoCargaLote;
-        } catch {
-          data = {};
+          const res = await fetch('/api/v1/facturas/upload', {
+            method: 'POST',
+            headers: { 'x-tlm-user-id': String(currentUser?.id_usuario || '') },
+            body: formData
+          });
+          const responseText = await res.text();
+          let data: ResultadoCargaLote;
+          try {
+            data = JSON.parse(responseText) as ResultadoCargaLote;
+          } catch {
+            const error = new Error('El servidor devolvió una respuesta inválida.') as ErrorCarga;
+            error.retryable = true;
+            throw error;
+          }
+
+          if (!res.ok) {
+            const error = new Error(data.detail || `El servidor respondió con error ${res.status}.`) as ErrorCarga;
+            error.retryable = res.status === 408 || res.status === 413 || res.status === 429 || res.status >= 500;
+            throw error;
+          }
+          const procesados = Number(data.archivos_procesados ?? 0);
+          if (procesados !== lote.length) {
+            const error = new Error(`El servidor recibió ${procesados} de ${lote.length} archivo(s) de este lote.`) as ErrorCarga;
+            error.retryable = true;
+            throw error;
+          }
+
+          total.archivos_procesados += procesados;
+          archivosConfirmados += procesados;
+          total.xmls_extraidos += Number(data.xmls_extraidos ?? 0);
+          total.facturas_creadas += Number(data.facturas_creadas ?? 0);
+          total.facturas_duplicadas += Number(data.facturas_duplicadas ?? 0);
+          total.facturas_nuevas += Number(data.facturas_nuevas ?? 0);
+          total.pdfs_originales += Number(data.pdfs_originales ?? 0);
+          total.ventas += Number(data.ventas ?? 0);
+          total.compras += Number(data.compras ?? 0);
+          total.fallos_archivado += (data.archivados || []).filter((a: any) => !a.ok).length;
+        } catch (err) {
+          const error: ErrorCarga = err instanceof Error ? err as ErrorCarga : new Error('Error desconocido.') as ErrorCarga;
+          if (err instanceof TypeError) error.retryable = true;
+          if (error.retryable && lote.length > 1) {
+            const mitad = Math.ceil(lote.length / 2);
+            await enviarLote(lote.slice(0, mitad));
+            await enviarLote(lote.slice(mitad));
+          } else {
+            archivosFallidos.push(...lote.map(file => ({ nombre: file.name, error: error.message })));
+          }
         }
+      };
 
-        if (!res.ok) throw new Error(data.detail || `El servidor respondió con error ${res.status}.`);
-        const procesados = Number(data.archivos_procesados ?? 0);
-        if (procesados !== lote.length) {
-          throw new Error(`El servidor recibió ${procesados} de ${lote.length} archivo(s) de este lote.`);
-        }
+      for (const lote of lotes) await enviarLote(lote);
 
-        total.archivos_procesados += procesados;
-        archivosConfirmados += procesados;
-        total.xmls_extraidos += Number(data.xmls_extraidos ?? 0);
-        total.facturas_creadas += Number(data.facturas_creadas ?? 0);
-        total.facturas_duplicadas += Number(data.facturas_duplicadas ?? 0);
-        total.facturas_nuevas += Number(data.facturas_nuevas ?? 0);
-        total.pdfs_originales += Number(data.pdfs_originales ?? 0);
-        total.ventas += Number(data.ventas ?? 0);
-        total.compras += Number(data.compras ?? 0);
-        total.fallos_archivado += (data.archivados || []).filter((a: any) => !a.ok).length;
-      }
-
-      if (total.archivos_procesados !== archivos.length) {
-        throw new Error(`Se procesaron ${total.archivos_procesados} de ${archivos.length} archivos.`);
-      }
-
-      if (total.facturas_creadas > 0) {
+      if (archivosFallidos.length) {
+        const detalle = archivosFallidos.slice(0, 3).map(a => `${a.nombre}: ${a.error}`).join('; ');
+        const restantes = archivosFallidos.length > 3 ? `; y ${archivosFallidos.length - 3} más` : '';
+        showToast(`Se cargaron ${total.archivos_procesados} de ${archivos.length} archivos. ${archivosFallidos.length} no se pudieron procesar: ${detalle}${restantes}`, 'error');
+      } else if (total.facturas_creadas > 0) {
         showToast(`Se procesaron ${total.archivos_procesados} archivo(s): ${total.facturas_creadas} facturas (${total.ventas} ventas, ${total.compras} compras)${total.fallos_archivado ? `. ${total.fallos_archivado} original(es) no se pudieron guardar en la carpeta de la empresa` : '. Originales guardados en la carpeta de la empresa'}.`, total.fallos_archivado ? 'info' : 'success');
       } else {
         showToast(`Se procesaron ${total.archivos_procesados} archivo(s), pero no se detectaron nuevas facturas válidas.`, 'info');

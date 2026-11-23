@@ -3,6 +3,7 @@ import net from 'net';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import JSZip from 'jszip';
 
 // Cada ejecución trabaja en un directorio temporal: no toca data/tlm_database.json real.
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tlm-test-'));
@@ -352,6 +353,31 @@ describe('empresas', () => {
 });
 
 describe('facturas XML (UBL)', () => {
+  test('lee más de 100 XML y ZIP anidado sin límite fijo, incluidas notas crédito', async () => {
+    const zip = new JSZip();
+    for (let i = 1; i <= 120; i++) {
+      zip.file(`documentos/FE-${i}.xml`, xmlFactura(`FE-ZIP-${i}`, [1000], { root: i === 120 ? 'CreditNote' : 'Invoice' }));
+    }
+
+    let archivoAnidado = new JSZip();
+    archivoAnidado.file('FE-anidada.xml', xmlFactura('FE-ZIP-ANIDADA', [2000]));
+    let bufferAnidado = await archivoAnidado.generateAsync({ type: 'nodebuffer' });
+    for (let i = 0; i < 3; i++) {
+      const contenedor = new JSZip();
+      contenedor.file(`nivel-${i}.zip`, bufferAnidado);
+      bufferAnidado = await contenedor.generateAsync({ type: 'nodebuffer' });
+    }
+    zip.file('archivo-anidado.zip', bufferAnidado);
+
+    const { xmlParser } = await import('../src/server/services/xmlUblParser.ts');
+    const rutaZip = path.join(workDir, 'lote-masivo.zip');
+    fs.writeFileSync(rutaZip, await zip.generateAsync({ type: 'nodebuffer' }));
+    const documentos = await xmlParser.parseFilePath(rutaZip, 'lote-masivo.zip');
+    expect(documentos).toHaveLength(121);
+    expect(documentos.find(d => d.factura_num === 'FE-ZIP-120')?.tipo_comprobante).toBe('Nota de Crédito');
+    expect(documentos.some(d => d.factura_num === 'FE-ZIP-ANIDADA')).toBe(true);
+  });
+
   test('subtotal toma el total de cabecera, no la primera línea', async () => {
     const r = await subirXml('FE-1001.xml', xmlFactura('FE-1001', [1000000, 1000000]));
     expect(r.status).toBeLessThan(300);

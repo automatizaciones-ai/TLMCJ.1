@@ -19,6 +19,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import https from 'node:https';
 import { JWT, OAuth2Client } from 'google-auth-library';
 import { pool } from '../../db/index.ts';
 
@@ -316,6 +317,55 @@ export class GoogleDriveClient {
     });
   }
 
+  static async subirDesdeArchivo(padreId: string, nombre: string, filePath: string, mime: string, size: number): Promise<{ id: string; webViewLink?: string }> {
+    const token = await this.accessToken();
+    const meta = JSON.stringify({ name: nombre, parents: [padreId] });
+    const inicio = await fetch(`${DRIVE_UPLOAD}/files?uploadType=resumable&supportsAllDrives=true&fields=id,webViewLink`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': mime,
+        'X-Upload-Content-Length': String(size)
+      },
+      body: meta
+    });
+    if (!inicio.ok) throw new Error(`Google Drive no inició la carga: ${inicio.status} ${inicio.statusText}`);
+    const urlCarga = inicio.headers.get('location');
+    if (!urlCarga) throw new Error('Google Drive no devolvió la URL para continuar la carga.');
+
+    return new Promise((resolve, reject) => {
+      const request = https.request(urlCarga, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': mime,
+          'Content-Length': String(size)
+        }
+      }, response => {
+        const chunks: Buffer[] = [];
+        response.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        response.on('error', reject);
+        response.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          if ((response.statusCode || 500) < 200 || (response.statusCode || 500) >= 300) {
+            reject(new Error(`Google Drive no pudo guardar el archivo: ${response.statusCode} ${body}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch (err) {
+            reject(new Error('Google Drive devolvió una respuesta inválida al guardar el archivo.', { cause: err }));
+          }
+        });
+      });
+      request.on('error', reject);
+      const source = fs.createReadStream(filePath);
+      source.on('error', err => request.destroy(err));
+      source.pipe(request);
+    });
+  }
+
   static async descargar(id: string): Promise<Buffer> {
     return this.llamar(`${DRIVE_API}/files/${encodeURIComponent(id)}?alt=media&supportsAllDrives=true`, {}, true);
   }
@@ -587,7 +637,8 @@ class EmpresaStorageServiceImpl {
     empresa: EmpresaRef;
     categoria: CategoriaArchivo;
     nombre: string;
-    contenido: Buffer;
+    contenido?: Buffer;
+    rutaContenido?: string;
     mime?: string;
     periodo?: string;
     usuario?: string;
@@ -600,6 +651,7 @@ class EmpresaStorageServiceImpl {
     }
 
     try {
+      if (!params.contenido && !params.rutaContenido) throw new Error('Debe indicar el contenido o la ruta del archivo que se va a archivar.');
       if (cfg.estado !== 'CONECTADO' || !cfg.subcarpetas[categoria]) {
         // Autoinicializa: en LOCAL siempre; en Drive solo si ya hay un destino definido
         if (cfg.proveedor === 'LOCAL' || cfg.raiz_id) {
@@ -610,7 +662,16 @@ class EmpresaStorageServiceImpl {
       const periodo = params.periodo && /^\d{4}-\d{2}$/.test(params.periodo) ? params.periodo : periodoActual();
       const nombre = nombreArchivoSeguro(params.nombre);
       const mime = params.mime || 'application/octet-stream';
-      const sha256 = crypto.createHash('sha256').update(params.contenido).digest('hex');
+      const tamanoBytes = params.contenido
+        ? params.contenido.length
+        : (await fs.promises.stat(params.rutaContenido!)).size;
+      const hash = crypto.createHash('sha256');
+      if (params.contenido) {
+        hash.update(params.contenido);
+      } else {
+        for await (const chunk of fs.createReadStream(params.rutaContenido!)) hash.update(chunk);
+      }
+      const sha256 = hash.digest('hex');
 
       // Mismo contenido ya archivado en esta categoría y destino → no se duplica
       const existente = this.archivos.find(a => a.id_empresa === empresa.id_empresa && a.categoria === categoria && a.sha256 === sha256 && a.proveedor === cfg.proveedor);
@@ -630,7 +691,8 @@ class EmpresaStorageServiceImpl {
           const ext = path.extname(nombre);
           destino = path.join(dir, `${path.basename(nombre, ext)}_${Date.now()}${ext}`);
         }
-        fs.writeFileSync(destino, params.contenido);
+        if (params.contenido) fs.writeFileSync(destino, params.contenido);
+        else await fs.promises.copyFile(params.rutaContenido!, destino);
         referencia = path.relative(this.directorioLocalBase, destino);
       } else {
         const carpetaCategoria = cfg.subcarpetas[categoria];
@@ -638,7 +700,9 @@ class EmpresaStorageServiceImpl {
         const padre = cfg.organizar_por_periodo
           ? await GoogleDriveClient.asegurarCarpeta(carpetaCategoria, periodo, cfg.unidad_compartida_id)
           : carpetaCategoria;
-        const subido = await GoogleDriveClient.subir(padre, nombre, params.contenido, mime);
+        const subido = params.contenido
+          ? await GoogleDriveClient.subir(padre, nombre, params.contenido, mime)
+          : await GoogleDriveClient.subirDesdeArchivo(padre, nombre, params.rutaContenido!, mime, tamanoBytes);
         referencia = subido.id;
         url = subido.webViewLink;
       }
@@ -652,7 +716,7 @@ class EmpresaStorageServiceImpl {
         proveedor: cfg.proveedor,
         referencia,
         url,
-        tamano_bytes: params.contenido.length,
+        tamano_bytes: tamanoBytes,
         mime,
         sha256,
         creado_en: new Date().toISOString(),

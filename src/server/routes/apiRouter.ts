@@ -1,6 +1,9 @@
 import express, { type Request, type Response } from 'express';
 const Router = express.Router;
 import multer from 'multer';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { db, getDefaultPermissions } from '../storage/dataStore.ts';
 import { xmlParser, emparejarPdfs, type ParsedXmlInvoice } from '../services/xmlUblParser.ts';
 import { SoportesOriginales } from '../services/soportesOriginalesService.ts';
@@ -48,6 +51,14 @@ const empresaPublica = (e: any) => {
   return { ...resto, siigo_access_key: siigo_access_key ? '••••••••••••••••' : undefined, has_siigo_credentials: Boolean(e.siigo_username && siigo_access_key) };
 };
 const upload = multer({ limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB support for batch uploads
+const directorioSubidasFacturas = path.join(os.tmpdir(), 'tlm-subidas-facturas');
+fs.mkdirSync(directorioSubidasFacturas, { recursive: true });
+const uploadFacturas = multer({
+  storage: multer.diskStorage({
+    destination: directorioSubidasFacturas,
+    filename: (_req, _file, callback) => callback(null, crypto.randomUUID())
+  })
+});
 
 // ==========================================
 // ==========================================
@@ -1428,9 +1439,23 @@ router.get('/facturas', async (req: Request, res: Response) => {
   res.json(items);
 });
 
-router.post('/facturas/upload', upload.array('archivos'), async (req: Request, res: Response) => {
+router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Request, res: Response) => {
   const idEmpresa = parseInt(req.body.id_empresa || '1');
   const files = (req.files as Express.Multer.File[]) || [];
+  let limpiezaIniciada = false;
+  const limpiarSubidas = () => {
+    if (limpiezaIniciada) return;
+    limpiezaIniciada = true;
+    void Promise.all(files.map(async file => {
+      try {
+        await fs.promises.unlink(file.path);
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') console.warn(`[Upload] No se pudo eliminar el temporal "${file.path}":`, err);
+      }
+    }));
+  };
+  res.once('finish', limpiarSubidas);
+  res.once('close', limpiarSubidas);
   const parsedFacturas: Partial<Factura>[] = [];
   let archivosXmlExtraidos = 0;
 
@@ -1446,11 +1471,26 @@ router.post('/facturas/upload', upload.array('archivos'), async (req: Request, r
   const pdfsSueltos: { nombre: string; contenido: Buffer }[] = [];
 
   for (const file of files) {
-    const esPdf = file.originalname.toLowerCase().endsWith('.pdf') || file.buffer.subarray(0, 5).toString('latin1') === '%PDF-';
-    // Use parseFileBuffer so ZIP archives are unpacked and all inner XMLs are processed
-    const parsedList = esPdf ? [] : await xmlParser.parseFileBuffer(file.buffer, file.originalname, nitEmpresa);
-    if (esPdf) pdfsSueltos.push({ nombre: file.originalname, contenido: file.buffer });
-    else if (!/\.zip$/i.test(file.originalname) && !(file.buffer[0] === 0x50 && file.buffer[1] === 0x4B)) xmlSueltos.push(...parsedList);
+    const handle = await fs.promises.open(file.path, 'r');
+    let cabecera: Buffer;
+    try {
+      cabecera = Buffer.alloc(5);
+      await handle.read(cabecera, 0, cabecera.length, 0);
+    } finally {
+      await handle.close();
+    }
+    const esPdf = file.originalname.toLowerCase().endsWith('.pdf') || cabecera.subarray(0, 5).toString('latin1') === '%PDF-';
+    const esZip = /\.zip$/i.test(file.originalname) || (cabecera[0] === 0x50 && cabecera[1] === 0x4B);
+    let parsedList: ParsedXmlInvoice[];
+    try {
+      parsedList = esPdf ? [] : await xmlParser.parseFilePath(file.path, file.originalname, nitEmpresa);
+      if (esPdf) pdfsSueltos.push({ nombre: file.originalname, contenido: await fs.promises.readFile(file.path) });
+    } catch (err) {
+      const detalle = err instanceof Error ? err.message : String(err);
+      console.error(`[Upload] No se pudo leer "${file.originalname}":`, err);
+      return res.status(422).json({ detail: `No se pudo leer "${file.originalname}": ${detalle}` });
+    }
+    if (!esPdf && !esZip) xmlSueltos.push(...parsedList);
     conPdf.push(...parsedList);
     archivosXmlExtraidos += parsedList.length;
 
@@ -1461,7 +1501,7 @@ router.post('/facturas/upload', upload.array('archivos'), async (req: Request, r
         empresa: { id_empresa: empresaActiva.id_empresa, nit: empresaActiva.nit, nombre_comercial: empresaActiva.nombre_comercial },
         categoria: 'FACTURAS_XML',
         nombre: file.originalname,
-        contenido: file.buffer,
+        rutaContenido: file.path,
         mime: file.mimetype || 'application/octet-stream',
         periodo: fechas.length ? fechas[fechas.length - 1].substring(0, 7) : undefined,
         usuario: db.usuarios.find(u => u.id_usuario === Number(req.headers['x-tlm-user-id']))?.nombre_completo
