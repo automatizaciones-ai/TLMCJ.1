@@ -77,6 +77,8 @@ const RUTAS_PUBLICAS = new Set([
   '/auth/logout',
   '/auth/sesion',
   '/auth/register',
+  '/auth/register/verify',
+  '/auth/register/resend-verification',
   '/auth/recuperar-password/solicitar-codigo',
   '/auth/recuperar-password/verificar-y-cambiar'
 ]);
@@ -95,6 +97,9 @@ export function guardarApi(req: Request, res: Response, next: NextFunction) {
   const user = getSessionUser(req);
   if (!user) {
     return res.status(401).json({ detail: "Debes iniciar sesión para continuar." });
+  }
+  if (user.requiere_cambio_password && req.path !== '/auth/cambiar-password') {
+    return res.status(403).json({ detail: 'Debes cambiar tu contraseña antes de continuar.' });
   }
   if (requiereAdmin(req) && !isAdminUser(user)) {
     return res.status(403).json({ detail: "Solo un administrador puede realizar esta acción." });

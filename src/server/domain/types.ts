@@ -54,6 +54,9 @@ export interface Usuario {
   permisos: PermisosUsuario;
   avatar_url?: string | null;
   requiere_cambio_password?: boolean;
+  email_verified?: boolean;
+  verification_token?: string | null;
+  token_expires_at?: string | null;
   codigo_recuperacion?: string | null;
   codigo_recuperacion_expira?: string | null;
   intentos_codigo?: number;

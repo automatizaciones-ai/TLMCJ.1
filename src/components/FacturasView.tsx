@@ -46,7 +46,7 @@ interface FacturasViewProps {
   onRefresh?: () => void;
   onShowToast?: (message: string, type?: 'success' | 'info' | 'error') => void;
   isUploading?: boolean;
-  onUploadXmlWithProgress?: (files: FileList) => Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number }>;
+  onUploadXmlWithProgress?: (files: FileList) => Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number; errores_lectura?: { nombre: string; error: string }[] }>;
 }
 
 const CUENTAS_AVANZADAS: { clave: string; etiqueta: string; defecto: string }[] = [
@@ -121,7 +121,7 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
   const [ocupado, setOcupado] = useState<'' | 'auditoria' | 'erp' | 'pdf' | 'masivo' | 'siigo'>('');
   const [uploading, setUploading] = useState(false);
   const [arrastrando, setArrastrando] = useState(false);
-  const [resultadoCargue, setResultadoCargue] = useState<{ procesados: number; nuevas: number; duplicadas: number; pdfs: number } | null>(null);
+  const [resultadoCargue, setResultadoCargue] = useState<{ procesados: number; nuevas: number; duplicadas: number; pdfs: number; errores: { nombre: string; error: string }[] } | null>(null);
   const [menuExportar, setMenuExportar] = useState(false);
   const inputArchivos = useRef<HTMLInputElement>(null);
 
@@ -218,7 +218,7 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
     try {
       if (onUploadXmlWithProgress) {
         const r = await onUploadXmlWithProgress(files);
-        setResultadoCargue({ procesados: r.facturas_creadas, nuevas: r.facturas_nuevas ?? r.facturas_creadas, duplicadas: r.facturas_duplicadas ?? 0, pdfs: r.pdfs_originales ?? 0 });
+        setResultadoCargue({ procesados: r.facturas_creadas, nuevas: r.facturas_nuevas ?? r.facturas_creadas, duplicadas: r.facturas_duplicadas ?? 0, pdfs: r.pdfs_originales ?? 0, errores: r.errores_lectura || [] });
       } else {
         onUploadXml(files);
       }
@@ -393,7 +393,7 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
           <UploadCloud className="w-6 h-6 text-[#271a82]" />
           <div>
             <h3 className="font-bold text-slate-800 text-base">Carga Automática de Comprobantes</h3>
-            <p className="text-xs text-slate-500">Soporta paquetes .ZIP de la DIAN (XML + PDF) o archivos XML UBL 2.1 con su PDF. <button onClick={() => inputArchivos.current?.click()} className="font-bold text-[#271a82] hover:underline cursor-pointer">Arrastra tus archivos aquí o haz clic para explorar</button>.</p>
+            <p className="text-xs text-slate-500">Lee facturas y notas crédito desde XML UBL 2.1, PDF o paquetes .ZIP de la DIAN. Los archivos que no pueda interpretar se reintentan y quedan listados para revisión. <button onClick={() => inputArchivos.current?.click()} className="font-bold text-[#271a82] hover:underline cursor-pointer">Arrastra tus archivos aquí o haz clic para explorar</button>.</p>
             <input ref={inputArchivos} type="file" multiple accept=".xml,.zip,.pdf,application/zip,text/xml,application/xml,application/pdf" className="hidden" onChange={e => { subirArchivos(e.target.files); e.target.value = ''; }} />
           </div>
           <div className="flex flex-wrap justify-center items-center gap-2">
@@ -445,13 +445,28 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
       </div>
 
       {resultadoCargue && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-5 py-3 flex flex-wrap items-center gap-3 text-xs font-semibold text-emerald-800">
-          <FileCheck2 className="w-4 h-4 text-emerald-600 shrink-0" />
-          <span>Proceso completado: <b>{resultadoCargue.nuevas}</b> facturas nuevas registradas</span>
-          <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800">Duplicadas omitidas: {resultadoCargue.duplicadas}</span>
-          <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800">PDF originales guardados: {resultadoCargue.pdfs}</span>
-          <span className="text-emerald-700">Los originales quedaron en la carpeta de la empresa.</span>
-          <button onClick={() => setResultadoCargue(null)} className="ml-auto p-1 rounded hover:bg-emerald-100 cursor-pointer"><X className="w-3.5 h-3.5" /></button>
+        <div className={`border rounded-2xl px-5 py-3 text-xs font-semibold ${resultadoCargue.errores.length ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
+          <div className="flex flex-wrap items-center gap-3">
+            {resultadoCargue.errores.length
+              ? <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              : <FileCheck2 className="w-4 h-4 text-emerald-600 shrink-0" />}
+            <span>Proceso completado: <b>{resultadoCargue.nuevas}</b> facturas nuevas registradas</span>
+            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800">Duplicadas omitidas: {resultadoCargue.duplicadas}</span>
+            <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800">PDF originales guardados: {resultadoCargue.pdfs}</span>
+            {resultadoCargue.errores.length
+              ? <span className="text-amber-800">{resultadoCargue.errores.length} archivo(s) requieren revisión.</span>
+              : <span className="text-emerald-700">Los originales quedaron en la carpeta de la empresa.</span>}
+            <button onClick={() => setResultadoCargue(null)} className="ml-auto p-1 rounded hover:bg-emerald-100 cursor-pointer"><X className="w-3.5 h-3.5" /></button>
+          </div>
+          {resultadoCargue.errores.length > 0 && (
+            <ul className="mt-3 max-h-40 overflow-y-auto space-y-1 border-t border-amber-200 pt-2">
+              {resultadoCargue.errores.map((error, indice) => (
+                <li key={`${error.nombre}-${indice}`} className="break-all">
+                  <b>{error.nombre}:</b> {error.error}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 

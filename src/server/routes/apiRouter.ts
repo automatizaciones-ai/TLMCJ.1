@@ -8,7 +8,7 @@ import { db, getDefaultPermissions } from '../storage/dataStore.ts';
 import { xmlParser, emparejarPdfs, type ParsedXmlInvoice } from '../services/xmlUblParser.ts';
 import { SoportesOriginales } from '../services/soportesOriginalesService.ts';
 import { NotificacionesService, ocultarSecretos } from '../services/notificacionesService.ts';
-import { CorreoService } from '../services/correoService.ts';
+import { CorreoService, correoValido } from '../services/correoService.ts';
 import { reconciliationEngine } from '../services/reconciliationEngine.ts';
 import { f350TaxEngine } from '../services/f350TaxEngine.ts';
 import { siigoService } from '../services/siigoService.ts';
@@ -37,7 +37,7 @@ function numeroEnRango(valor: unknown, min: number, max: number): number | null 
 // Nunca enviar al navegador hashes de contraseña, códigos OTP ni llaves de Siigo
 const usuarioPublico = (u: any) => {
   if (!u) return u;
-  const { hashed_password, codigo_recuperacion, codigo_recuperacion_expira, verification_token, ...resto } = u;
+  const { hashed_password, codigo_recuperacion, codigo_recuperacion_expira, verification_token, token_expires_at, ...resto } = u;
   return resto;
 };
 /** Usuario que hace la solicitud (encabezado x-tlm-user-id enviado por la interfaz) */
@@ -91,6 +91,60 @@ async function buscarUsuarioPorCorreo(correo: string): Promise<any | null> {
   const local = db.usuarios.find(u => u.email.toLowerCase() === correo);
   if (local) return local;
   return (await CloudSqlService.getUsuarioByEmail(correo).catch(() => null)) || null;
+}
+
+async function buscarUsuarioPorToken(tokenHash: string): Promise<any | null> {
+  const local = db.usuarios.find(u => u.verification_token === tokenHash);
+  if (local) return local;
+  const usuarios = await CloudSqlService.getUsuarios();
+  return usuarios.find(u => u.verification_token === tokenHash) || null;
+}
+
+function baseUrlAplicacion(req: Request): string {
+  const configuredUrl = process.env.APP_URL || process.env.RENDER_EXTERNAL_URL;
+  const appUrl = new URL(configuredUrl || `${req.protocol}://${req.get('host')}`);
+  if (appUrl.protocol !== 'https:' && appUrl.protocol !== 'http:') {
+    throw new Error('APP_URL debe usar HTTP o HTTPS.');
+  }
+  return appUrl.origin;
+}
+
+async function enviarCorreosRegistro(req: Request, user: Usuario, token: string): Promise<void> {
+  if (!mailer.enabled) throw new Error('El servicio de correo no está configurado.');
+  const baseUrl = baseUrlAplicacion(req);
+  const verificationUrl = `${baseUrl}/api/v1/auth/register/verify?token=${encodeURIComponent(token)}`;
+  const urlConsola = `${baseUrl}/`;
+  const avisos = [
+    mailer.send(
+      user.email,
+      'Confirma tu correo para solicitar acceso a Consola TLM',
+      `Hola ${user.nombre_completo},\n\nPara confirmar que tienes acceso a este buzón, abre este enlace dentro de las próximas 24 horas:\n${verificationUrl}\n\nDespués de verificarlo, el equipo de TLM revisará tu solicitud y la relación de tu cuenta con TLM o una entidad conocida. Si se aprueba el acceso, al iniciar sesión deberás elegir una contraseña personal nueva.`
+    ),
+    ...['juan.yaya@tlm.net.co', 'automatizaciones@tlm.net.co'].map(destinatario =>
+      mailer.send(
+        destinatario,
+        'Solicitud de autorización de cuenta - Consola TLM',
+        `Se recibió una solicitud de acceso:\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\nCorreo verificado: Pendiente\n\nConfirme que conoce a la persona y su relación con TLM o con una entidad conocida. El usuario debe verificar primero que tiene acceso al buzón; después puede revisar y aprobar la solicitud en la sección Accesos de Consola TLM:\n${urlConsola}\n\nNo se incluye ni se envía la contraseña del usuario.`
+      )
+    )
+  ];
+  await Promise.all(avisos);
+}
+
+async function guardarCambiosUsuario(user: Usuario, cambios: Partial<Usuario>): Promise<Usuario> {
+  const usuarioLocal = db.usuarios.includes(user);
+  let actualizado: Usuario | null = null;
+  try {
+    actualizado = await CloudSqlService.updateUsuario(user.id_usuario, cambios);
+    if (!actualizado && !usuarioLocal) throw new Error('No se encontró el usuario en Cloud SQL.');
+  } catch (error) {
+    if (!usuarioLocal) throw error;
+    console.warn('[CloudSQL] Se guardará localmente la actualización del usuario:', error);
+  }
+  Object.assign(user, cambios);
+  if (!db.usuarios.includes(user)) db.usuarios.push(user);
+  db.saveToDisk();
+  return actualizado ? Object.assign(user, actualizado, cambios) : user;
 }
 
 /** Guarda la contraseña (siempre cifrada) en Cloud SQL y en el almacenamiento local. */
@@ -148,6 +202,9 @@ router.post('/auth/login', async (req: Request, res: Response) => {
 
   const user = await buscarUsuarioPorCorreo(correo);
   if (!user) return fallo('Credenciales inválidas. Verifica tu correo corporativo.');
+  if (user.email_verified === false) {
+    return res.status(403).json({ detail: 'Confirma tu correo desde el enlace enviado para continuar con la solicitud de acceso.' });
+  }
   if (!user.activo) {
     return res.status(403).json({ detail: 'Tu cuenta está pendiente de aprobación por el Administrador Maestro (Juan Yaya).' });
   }
@@ -416,23 +473,117 @@ router.get('/auth/notificaciones-seguridad', (_req: Request, res: Response) => {
 
 router.post('/auth/register', async (req: Request, res: Response) => {
   const { nombre_completo, email, password } = req.body;
-  if (!email || !nombre_completo) return res.status(400).json({ detail: 'Nombre completo y correo son requeridos.' });
-  const correo = String(email).toLowerCase().trim();
+  if (typeof email !== 'string' || typeof nombre_completo !== 'string' || !nombre_completo.trim()) {
+    return res.status(400).json({ detail: 'Nombre completo y correo son requeridos.' });
+  }
+  const correo = email.toLowerCase().trim();
+  if (!correoValido(correo)) return res.status(400).json({ detail: 'Ingresa una dirección de correo válida.' });
   if (await buscarUsuarioPorCorreo(correo)) return res.status(400).json({ detail: 'El correo electrónico ya se encuentra registrado.' });
   const checkRule = validatePasswordRule(password);
   if (!checkRule.ok) return res.status(400).json({ detail: checkRule.message });
+  const claveRegistroIp = `registro:ip:${req.ip}`;
+  const segundosRegistro = secondsLocked(claveRegistroIp);
+  if (segundosRegistro > 0) {
+    res.set('Retry-After', String(segundosRegistro));
+    return res.status(429).json({ detail: `Espera ${segundosRegistro} segundos antes de enviar otra solicitud.` });
+  }
+  lockFor(claveRegistroIp, CODIGO_ESPERA_MS);
 
   const idNuevo = Math.max(...db.usuarios.map(u => u.id_usuario), 0) + 1;
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const nuevo: any = {
     id_usuario: idNuevo, nombre_completo: String(nombre_completo).trim(), email: correo,
     hashed_password: hashPassword(password), rol: 'Analista', activo: false,
-    requiere_cambio_password: false, empresas_ids: [1], permisos: getDefaultPermissions('Analista')
+    requiere_cambio_password: true, email_verified: false,
+    verification_token: hashCodigo(token), token_expires_at: tokenExpiresAt,
+    empresas_ids: [1], permisos: getDefaultPermissions('Analista')
   };
-  const creado = await CloudSqlService.createUsuario(nuevo).catch(() => null);
+  const creado = await CloudSqlService.createUsuario(nuevo).catch(err => {
+    console.warn('[CloudSQL] Fallback de registro a DataStore local:', err);
+    return null;
+  });
   if (creado) nuevo.id_usuario = creado.id_usuario;
   db.usuarios.push(nuevo);
   db.saveToDisk();
-  res.status(201).json({ mensaje: 'Registro solicitado correctamente. Un Administrador debe aprobar su acceso.', id_usuario: nuevo.id_usuario });
+  try {
+    await enviarCorreosRegistro(req, nuevo, token);
+  } catch (error: any) {
+    console.error('[Registro] No se pudieron enviar todos los correos de verificación/aprobación:', error);
+    return res.status(503).json({
+      detail: 'La solicitud quedó guardada, pero no se pudieron enviar todos los correos. Usa “Reenviar verificación” para intentarlo de nuevo.',
+      registro_creado: true
+    });
+  }
+  res.status(201).json({
+    mensaje: 'Solicitud guardada. Revisa tu correo y confirma el enlace; después, Juan Yaya o automatizaciones@tlm.net.co revisarán y aprobarán el acceso.',
+    id_usuario: nuevo.id_usuario
+  });
+});
+
+router.get('/auth/register/verify', async (req: Request, res: Response) => {
+  const token = typeof req.query.token === 'string' ? req.query.token : '';
+  if (!/^[a-f0-9]{64}$/i.test(token)) {
+    return res.status(400).type('html').send('<h1>Enlace no válido</h1><p>Solicita un nuevo correo de verificación desde Consola TLM.</p>');
+  }
+
+  const user = await buscarUsuarioPorToken(hashCodigo(token));
+  if (!user) {
+    return res.status(400).type('html').send('<h1>Enlace no válido o ya utilizado</h1><p>Solicita un nuevo correo de verificación desde Consola TLM.</p>');
+  }
+  if (!user.token_expires_at || new Date(user.token_expires_at).getTime() <= Date.now()) {
+    await guardarCambiosUsuario(user, { verification_token: null, token_expires_at: null });
+    return res.status(410).type('html').send('<h1>El enlace venció</h1><p>Vuelve a Consola TLM y solicita reenviar la verificación.</p>');
+  }
+
+  await guardarCambiosUsuario(user, { email_verified: true, verification_token: null, token_expires_at: null });
+  const baseUrl = baseUrlAplicacion(req);
+  const mensaje = `<h1>Correo verificado</h1><p>Tu buzón quedó confirmado. La solicitud aún requiere la aprobación de un administrador de TLM.</p><p><a href="${baseUrl}/">Ir a Consola TLM</a></p>`;
+  res.status(200).type('html').send(mensaje);
+
+  for (const destinatario of ['juan.yaya@tlm.net.co', 'automatizaciones@tlm.net.co']) {
+    try {
+      await mailer.send(
+        destinatario,
+        'Correo confirmado - solicitud de acceso a Consola TLM',
+        `El usuario confirmó que tiene acceso al buzón.\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\n\nRevise si conoce a esta persona y su relación con TLM o una entidad conocida. Si autoriza el acceso, apruébelo en la sección Accesos:\n${baseUrl}/`
+      );
+    } catch (error) {
+      console.error(`[Registro] No se pudo notificar la verificación a ${destinatario}:`, error);
+    }
+  }
+});
+
+router.post('/auth/register/resend-verification', async (req: Request, res: Response) => {
+  const correo = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  if (!correoValido(correo) || !mailer.enabled) {
+    return res.status(503).json({ detail: 'No fue posible reenviar el correo. Verifica la dirección y vuelve a intentar más tarde.' });
+  }
+  const claveReenvio = `registro:reenvio:${correo}`;
+  const segundosReenvio = secondsLocked(claveReenvio);
+  if (segundosReenvio > 0) {
+    res.set('Retry-After', String(segundosReenvio));
+    return res.status(429).json({ detail: `Espera ${segundosReenvio} segundos antes de solicitar otro correo.` });
+  }
+  const user = await buscarUsuarioPorCorreo(correo);
+  if (!user || user.activo || user.email_verified !== false) {
+    return res.json({ mensaje: 'Si hay una solicitud pendiente para ese correo, recibirás instrucciones para continuar.' });
+  }
+  lockFor(claveReenvio, CODIGO_ESPERA_MS);
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  await guardarCambiosUsuario(user, {
+    verification_token: hashCodigo(token),
+    token_expires_at: tokenExpiresAt
+  });
+  try {
+    await enviarCorreosRegistro(req, user, token);
+  } catch (error) {
+    console.error('[Registro] No se pudo reenviar la verificación:', error);
+    return res.status(503).json({ detail: 'No se pudieron enviar los correos. Vuelve a intentarlo más tarde.' });
+  }
+  res.json({ mensaje: 'Se reenviaron las instrucciones de verificación al correo indicado.' });
 });
 
 router.get('/auth/usuarios', async (_req: Request, res: Response) => {
@@ -449,26 +600,45 @@ router.get('/auth/usuarios', async (_req: Request, res: Response) => {
 
 router.patch('/auth/usuarios/:id/aprobar', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
+  let user = db.usuarios.find(u => u.id_usuario === id);
+  if (!user) {
+    try {
+      user = await CloudSqlService.getUsuarioById(id) || undefined;
+    } catch (error) {
+      console.error('[CloudSQL] No se pudo consultar el usuario para aprobación:', error);
+      return res.status(503).json({ detail: 'No se pudo consultar el usuario. Intenta de nuevo más tarde.' });
+    }
+  }
+  if (!user) return res.status(404).json({ detail: 'No se encontró el usuario solicitado.' });
+  if (user.email_verified === false) {
+    return res.status(409).json({ detail: 'El usuario debe confirmar su correo antes de aprobar el acceso.' });
+  }
+  if (user.activo) {
+    return res.json({ mensaje: 'El usuario ya está aprobado.', usuario: usuarioPublico(user), correo_enviado: false });
+  }
+
   try {
-    const updated = await CloudSqlService.updateUsuario(id, { activo: true });
-    const user = db.usuarios.find(u => u.id_usuario === id);
-    const yaActivo = user?.activo;
-    if (user) {
-      user.activo = true;
-      db.saveToDisk();
+    await guardarCambiosUsuario(user, { activo: true, requiere_cambio_password: true });
+    let correoEnviado = true;
+    try {
+      await mailer.send(
+        user.email,
+        'Tu acceso a Consola TLM fue aprobado',
+        `Hola ${user.nombre_completo},\n\nUn administrador aprobó tu solicitud de acceso a Consola TLM. Inicia sesión con el correo ${user.email} y la contraseña que elegiste al registrarte. Por seguridad, tendrás que cambiarla por una nueva contraseña personal antes de continuar.`
+      );
+    } catch (error) {
+      correoEnviado = false;
+      console.error('[Registro] No se pudo enviar el aviso de aprobación:', error);
     }
-    const aprobado = updated || user;
-    if (aprobado?.email && !yaActivo) {
-      db.addNotificacionSeguridad({
-        destinatario: aprobado.email,
-        asunto: 'Tu acceso a la Consola TLM fue aprobado',
-        tipo: 'CUENTA_APROBADA',
-        mensaje: `Hola ${aprobado.nombre_completo}, un administrador aprobó tu acceso a la Consola TLM. Ya puedes iniciar sesión con el correo ${aprobado.email} y la contraseña que registraste.`
-      });
-    }
-    res.json({ mensaje: `Usuario aprobado con éxito en Cloud SQL.`, usuario: aprobado });
+    res.json({
+      mensaje: correoEnviado
+        ? 'Usuario aprobado y aviso enviado por correo.'
+        : 'Usuario aprobado, pero no se pudo enviar el aviso por correo.',
+      usuario: usuarioPublico(user),
+      correo_enviado: correoEnviado
+    });
   } catch (err: any) {
-    res.status(500).json({ detail: err.message });
+    res.status(500).json({ detail: err.message || 'No se pudo aprobar el usuario.' });
   }
 });
 
@@ -1464,31 +1634,104 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
   const empresaActiva = empresasEnLinea.find(e => e.id_empresa === idEmpresa) || db.empresas.find(e => e.id_empresa === idEmpresa);
   const nitEmpresa = empresaActiva?.nit || '';
   const archivados: { nombre: string; ok: boolean; error?: string }[] = [];
+  const erroresLectura: { nombre: string; error: string; indice: number }[] = [];
+  const pendientesArchivado: Parameters<typeof EmpresaStorageService.archivarLote>[0] = [];
+  const guardarOriginales = async () => {
+    if (!pendientesArchivado.length) return;
+    const lote = pendientesArchivado.splice(0);
+    const resultados = await EmpresaStorageService.archivarLote(lote);
+    resultados.forEach((resultado, indice) => {
+      if (!resultado.omitido) {
+        archivados.push({
+          nombre: lote[indice].nombre,
+          ok: resultado.ok,
+          error: resultado.error
+        });
+      }
+    });
+  };
 
   // PDF originales: los que vienen dentro de cada .zip ya llegan emparejados; los PDF sueltos se emparejan con los XML sueltos
   const conPdf: ParsedXmlInvoice[] = [];
   const xmlSueltos: ParsedXmlInvoice[] = [];
-  const pdfsSueltos: { nombre: string; contenido: Buffer }[] = [];
+  const pdfsSueltos: { nombre: string; contenido: Buffer; indice: number }[] = [];
+  const agregarFactura = (p: ParsedXmlInvoice) => parsedFacturas.push({
+    id_empresa: idEmpresa,
+    factura_num: p.factura_num,
+    fecha: p.fecha,
+    fecha_vencimiento: p.fecha_vencimiento,
+    tipo_operacion: p.tipo_operacion,
+    proveedor: p.proveedor,
+    nit_tercero: p.nit_tercero,
+    telefono: p.telefono,
+    direccion: p.direccion,
+    ciudad: p.ciudad,
+    departamento: p.departamento,
+    correo: p.correo,
+    descripcion_item: p.descripcion_item,
+    cantidad: p.cantidad,
+    valor_unitario: p.valor_unitario,
+    subtotal: p.subtotal,
+    iva: p.iva,
+    total: p.total ?? p.subtotal + p.iva,
+    casilla_350: p.casilla_350,
+    retencion_porc: p.retencion_porc,
+    retencion_valor: p.retencion_valor,
+    reteica_tarifa: p.reteica_tarifa,
+    reteiva_porc: p.reteiva_porc,
+    forma_pago: p.forma_pago,
+    medio_pago: p.medio_pago,
+    cuenta_gasto: p.cuenta_gasto,
+    tipo_comprobante: p.tipo_comprobante,
+    cufe_hash: p.cufe_hash,
+    items: p.items,
+    datos_ubl: p.datos_ubl,
+    estado_revision: 'PENDIENTE',
+    fecha_cargue: new Date().toISOString()
+  });
 
-  for (const file of files) {
-    const handle = await fs.promises.open(file.path, 'r');
-    let cabecera: Buffer;
+  for (const [indice, file] of files.entries()) {
+    let cabecera = Buffer.alloc(5);
+    let errorLectura: string | undefined;
     try {
-      cabecera = Buffer.alloc(5);
-      await handle.read(cabecera, 0, cabecera.length, 0);
-    } finally {
-      await handle.close();
+      const handle = await fs.promises.open(file.path, 'r');
+      try {
+        await handle.read(cabecera, 0, cabecera.length, 0);
+      } finally {
+        await handle.close();
+      }
+    } catch (err) {
+      errorLectura = err instanceof Error ? err.message : String(err);
     }
     const esPdf = file.originalname.toLowerCase().endsWith('.pdf') || cabecera.subarray(0, 5).toString('latin1') === '%PDF-';
     const esZip = /\.zip$/i.test(file.originalname) || (cabecera[0] === 0x50 && cabecera[1] === 0x4B);
-    let parsedList: ParsedXmlInvoice[];
+    let parsedList: ParsedXmlInvoice[] = [];
+    const erroresArchivo: { nombre: string; error: string }[] = [];
     try {
-      parsedList = esPdf ? [] : await xmlParser.parseFilePath(file.path, file.originalname, nitEmpresa);
-      if (esPdf) pdfsSueltos.push({ nombre: file.originalname, contenido: await fs.promises.readFile(file.path) });
+      if (errorLectura) throw new Error(errorLectura);
+      if (esPdf) {
+        pdfsSueltos.push({
+          nombre: file.originalname,
+          contenido: await fs.promises.readFile(file.path),
+          indice
+        });
+      } else {
+        parsedList = await xmlParser.parseFilePath(file.path, file.originalname, nitEmpresa, erroresArchivo);
+      }
     } catch (err) {
-      const detalle = err instanceof Error ? err.message : String(err);
+      errorLectura = err instanceof Error ? err.message : String(err);
       console.error(`[Upload] No se pudo leer "${file.originalname}":`, err);
-      return res.status(422).json({ detail: `No se pudo leer "${file.originalname}": ${detalle}` });
+    }
+    if (!errorLectura && !esPdf && parsedList.length === 0 && !erroresArchivo.length) {
+      errorLectura = 'No se encontró una factura o nota crédito UBL válida en el XML/ZIP.';
+    }
+    erroresLectura.push(...erroresArchivo.map(error => ({
+      nombre: error.nombre,
+      error: error.error,
+      indice
+    })));
+    if (errorLectura && !erroresArchivo.length) {
+      erroresLectura.push({ nombre: file.originalname, error: errorLectura, indice });
     }
     if (!esPdf && !esZip) xmlSueltos.push(...parsedList);
     conPdf.push(...parsedList);
@@ -1497,7 +1740,7 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
     // Conservar el archivo original en el almacenamiento de la empresa (Drive / unidad compartida / local)
     if (empresaActiva) {
       const fechas = parsedList.map(p => p.fecha).filter(f => /^\d{4}-\d{2}/.test(f)).sort();
-      const r = await EmpresaStorageService.archivar({
+      pendientesArchivado.push({
         empresa: { id_empresa: empresaActiva.id_empresa, nit: empresaActiva.nit, nombre_comercial: empresaActiva.nombre_comercial },
         categoria: 'FACTURAS_XML',
         nombre: file.originalname,
@@ -1506,53 +1749,45 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
         periodo: fechas.length ? fechas[fechas.length - 1].substring(0, 7) : undefined,
         usuario: db.usuarios.find(u => u.id_usuario === Number(req.headers['x-tlm-user-id']))?.nombre_completo
       });
-      if (!r.omitido) archivados.push({ nombre: file.originalname, ok: r.ok, error: r.error });
     }
 
-    for (const p of parsedList) {
-      parsedFacturas.push({
-        id_empresa: idEmpresa,
-        factura_num: p.factura_num,
-        fecha: p.fecha,
-        fecha_vencimiento: p.fecha_vencimiento,
-        tipo_operacion: p.tipo_operacion,
-        proveedor: p.proveedor,
-        nit_tercero: p.nit_tercero,
-        telefono: p.telefono,
-        direccion: p.direccion,
-        ciudad: p.ciudad,
-        departamento: p.departamento,
-        correo: p.correo,
-        descripcion_item: p.descripcion_item,
-        cantidad: p.cantidad,
-        valor_unitario: p.valor_unitario,
-        subtotal: p.subtotal,
-        iva: p.iva,
-        total: p.total ?? p.subtotal + p.iva,
-        casilla_350: p.casilla_350,
-        retencion_porc: p.retencion_porc,
-        retencion_valor: p.retencion_valor,
-        reteica_tarifa: p.reteica_tarifa,
-        reteiva_porc: p.reteiva_porc,
-        forma_pago: p.forma_pago,
-        medio_pago: p.medio_pago,
-        cuenta_gasto: p.cuenta_gasto,
-        tipo_comprobante: p.tipo_comprobante,
-        cufe_hash: p.cufe_hash,
-        items: p.items,
-        datos_ubl: p.datos_ubl,
-        estado_revision: 'PENDIENTE',
-        fecha_cargue: new Date().toISOString()
+    parsedList.forEach(agregarFactura);
+  }
+
+  await guardarOriginales();
+
+  emparejarPdfs(xmlSueltos.filter(p => !p.pdf_original), pdfsSueltos);
+  const pdfsEmparejados = new Set(xmlSueltos.flatMap(factura =>
+    factura.pdf_original ? [factura.pdf_original] : []
+  ));
+  const pdfsSinPareja = pdfsSueltos.filter(pdf => !pdfsEmparejados.has(pdf));
+  for (const pdf of pdfsSinPareja) {
+    try {
+      const parsedList = await xmlParser.parseFileBuffer(pdf.contenido, pdf.nombre, nitEmpresa);
+      if (!parsedList.length) throw new Error('No se pudo identificar una factura o nota crédito en el PDF.');
+      conPdf.push(...parsedList);
+      archivosXmlExtraidos += parsedList.length;
+      parsedList.forEach(agregarFactura);
+    } catch (err) {
+      erroresLectura.push({
+        nombre: pdf.nombre,
+        error: err instanceof Error ? err.message : String(err),
+        indice: pdf.indice
       });
     }
   }
-
-  emparejarPdfs(xmlSueltos.filter(p => !p.pdf_original), pdfsSueltos);
   let pdfsOriginales = 0;
-  for (const p of conPdf) {
-    if (!p.pdf_original || !p.cufe_hash) continue;
-    await SoportesOriginales.guardar(idEmpresa, p.cufe_hash, p.pdf_original.nombre, p.pdf_original.contenido);
-    pdfsOriginales++;
+  const documentosConPdf = conPdf.flatMap(factura =>
+    factura.pdf_original && factura.cufe_hash
+      ? [{ factura, pdf: factura.pdf_original }]
+      : []
+  );
+  for (let inicio = 0; inicio < documentosConPdf.length; inicio += 8) {
+    const lote = documentosConPdf.slice(inicio, inicio + 8);
+    await Promise.all(lote.map(async ({ factura, pdf }) => {
+      await SoportesOriginales.guardar(idEmpresa, factura.cufe_hash, pdf.nombre, pdf.contenido);
+      pdfsOriginales++;
+    }));
   }
 
   let processedFacturas: Factura[] = [];
@@ -1591,6 +1826,7 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
   }
 
   const duplicadasCount = processedFacturas.filter((f: any) => f._duplicada).length;
+  const facturasNuevas = processedFacturas.filter((f: any) => !f._duplicada);
   processedFacturas = processedFacturas.map((f: any) => { const { _duplicada, ...resto } = f; return resto as Factura; });
   if (processedFacturas.length > 0) {
     // Reemplaza en la copia local las facturas de la misma empresa con el mismo CUFE (sin duplicar)
@@ -1618,10 +1854,13 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
     facturas_creadas: processedFacturas.length,
     facturas_duplicadas: duplicadasCount,
     facturas_nuevas: processedFacturas.length - duplicadasCount,
+    ventas_nuevas: facturasNuevas.filter(f => f.tipo_operacion === 'VENTA').length,
+    compras_nuevas: facturasNuevas.filter(f => f.tipo_operacion !== 'VENTA').length,
     pdfs_originales: pdfsOriginales,
-    pdfs_sin_pareja: pdfsSueltos.length - xmlSueltos.filter(p => p.pdf_original).length,
+    pdfs_sin_pareja: pdfsSinPareja.length,
     ventas: processedFacturas.filter(f => f.tipo_operacion === 'VENTA').length,
     compras: processedFacturas.filter(f => f.tipo_operacion !== 'VENTA').length,
+    errores_lectura: erroresLectura,
     archivados,
     facturas: processedFacturas
   });
