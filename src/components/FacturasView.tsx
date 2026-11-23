@@ -46,7 +46,17 @@ interface FacturasViewProps {
   onRefresh?: () => void;
   onShowToast?: (message: string, type?: 'success' | 'info' | 'error') => void;
   isUploading?: boolean;
-  onUploadXmlWithProgress?: (files: FileList) => Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number; errores_lectura?: { nombre: string; error: string }[] }>;
+  onUploadXmlWithProgress?: (
+    files: FileList,
+    onProgress: (progress: ProgresoCargaArchivos) => void
+  ) => Promise<{ archivos_procesados: number; archivos_totales?: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number; errores_lectura?: { nombre: string; error: string }[] }>;
+}
+
+export interface ProgresoCargaArchivos {
+  archivos_revisados: number;
+  archivos_totales: number;
+  facturas_nuevas: number;
+  archivos_con_error: number;
 }
 
 const CUENTAS_AVANZADAS: { clave: string; etiqueta: string; defecto: string }[] = [
@@ -120,8 +130,9 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
   // ---------------- Estado de procesos ----------------
   const [ocupado, setOcupado] = useState<'' | 'auditoria' | 'erp' | 'pdf' | 'masivo' | 'siigo'>('');
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<ProgresoCargaArchivos | null>(null);
   const [arrastrando, setArrastrando] = useState(false);
-  const [resultadoCargue, setResultadoCargue] = useState<{ procesados: number; nuevas: number; duplicadas: number; pdfs: number; errores: { nombre: string; error: string }[] } | null>(null);
+  const [resultadoCargue, setResultadoCargue] = useState<{ archivosProcesados: number; archivosTotales: number; documentosExtraidos: number; nuevas: number; duplicadas: number; pdfs: number; errores: { nombre: string; error: string }[] } | null>(null);
   const [menuExportar, setMenuExportar] = useState(false);
   const inputArchivos = useRef<HTMLInputElement>(null);
 
@@ -214,11 +225,22 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
   const subirArchivos = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     setUploading(true);
+    setUploadProgress({ archivos_revisados: 0, archivos_totales: files.length, facturas_nuevas: 0, archivos_con_error: 0 });
     setResultadoCargue(null);
     try {
       if (onUploadXmlWithProgress) {
-        const r = await onUploadXmlWithProgress(files);
-        setResultadoCargue({ procesados: r.facturas_creadas, nuevas: r.facturas_nuevas ?? r.facturas_creadas, duplicadas: r.facturas_duplicadas ?? 0, pdfs: r.pdfs_originales ?? 0, errores: r.errores_lectura || [] });
+        const r = await onUploadXmlWithProgress(files, progress => {
+          setUploadProgress(progress);
+        });
+        setResultadoCargue({
+          archivosProcesados: r.archivos_procesados,
+          archivosTotales: r.archivos_totales ?? files.length,
+          documentosExtraidos: r.xmls_extraidos,
+          nuevas: r.facturas_nuevas ?? r.facturas_creadas,
+          duplicadas: r.facturas_duplicadas ?? 0,
+          pdfs: r.pdfs_originales ?? 0,
+          errores: r.errores_lectura || []
+        });
       } else {
         onUploadXml(files);
       }
@@ -226,6 +248,7 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
       /* el aviso lo muestra App */
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -450,7 +473,11 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
             {resultadoCargue.errores.length
               ? <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
               : <FileCheck2 className="w-4 h-4 text-emerald-600 shrink-0" />}
-            <span>Proceso completado: <b>{resultadoCargue.nuevas}</b> facturas nuevas registradas</span>
+            <span>
+              Se revisaron <b>{resultadoCargue.archivosProcesados} de {resultadoCargue.archivosTotales}</b> archivos ·
+              <b> {resultadoCargue.documentosExtraidos}</b> documentos identificados ·
+              <b> {resultadoCargue.nuevas}</b> facturas nuevas registradas
+            </span>
             <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800">Duplicadas omitidas: {resultadoCargue.duplicadas}</span>
             <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800">PDF originales guardados: {resultadoCargue.pdfs}</span>
             {resultadoCargue.errores.length
@@ -467,6 +494,29 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
               ))}
             </ul>
           )}
+        </div>
+      )}
+      {uploading && uploadProgress && (
+        <div
+          className="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-xs text-indigo-950"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="font-bold">
+              Procesando {uploadProgress.archivos_revisados} de {uploadProgress.archivos_totales} archivos
+            </span>
+            <span>
+              {uploadProgress.facturas_nuevas} facturas nuevas
+              {uploadProgress.archivos_con_error > 0 && ` · ${uploadProgress.archivos_con_error} archivo(s) con error`}
+            </span>
+          </div>
+          <progress
+            className="h-2 w-full accent-[#271a82]"
+            max={uploadProgress.archivos_totales || 1}
+            value={uploadProgress.archivos_revisados}
+            aria-label="Progreso de carga de archivos"
+          />
         </div>
       )}
 
