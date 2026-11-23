@@ -21,12 +21,14 @@ Esta guía usa el archivo `render.yaml` del repositorio. Render crea el servicio
 | `DATABASE_URL` | La connection string de Neon |
 | `ADMIN_EMAIL` | Correo del administrador, por ejemplo `automatizaciones@tlm.net.co` |
 | `ADMIN_PASSWORD` | La contraseña del administrador (mínimo 8 caracteres) |
-| `SMTP_HOST` | Servidor SMTP, por ejemplo `smtp.gmail.com` |
-| `SMTP_USER` | Usuario SMTP |
-| `SMTP_PASS` | Clave SMTP (en Gmail, una contraseña de aplicación) |
-| `SMTP_FROM` | Remitente, por ejemplo `Consola TLM <no-reply@tlm.net.co>` |
-| `APP_URL` | URL pública HTTPS si Render no proporciona `RENDER_EXTERNAL_URL` o usas un dominio propio |
-| `APROBADOR_REGISTRO_EMAIL` | Correos separados por coma que recibirán enlaces de aprobación; por defecto se usa `ADMIN_EMAIL` |
+| `SMTP_HOST` | Opcional: servidor SMTP, por ejemplo `smtp.gmail.com` |
+| `SMTP_USER` | Opcional: usuario SMTP |
+| `SMTP_PASS` | Opcional: clave SMTP (en Gmail, una contraseña de aplicación) |
+| `SMTP_FROM` | Opcional: remitente, por ejemplo `Consola TLM <no-reply@tlm.net.co>` |
+| `APP_URL` | Opcional: URL pública HTTPS para enlaces de correo; Render puede proporcionar `RENDER_EXTERNAL_URL` |
+| `APROBADOR_REGISTRO_EMAIL` | Opcional: destinatarios de los enlaces de aprobación; por defecto se usa `ADMIN_EMAIL` |
+
+**No tienes servidor de correo?** Deja vacías las variables `SMTP_*`. El registro seguirá funcionando: las solicitudes quedarán pendientes y un administrador deberá verificar la identidad por otro medio y aprobarlas desde **Admin Usuarios & Cloud**. Sin SMTP no se envían verificaciones, avisos ni códigos de recuperación.
 
 `SESSION_SECRET` la genera Render sola. No la cambies salvo que tengas motivo.
 
@@ -36,9 +38,7 @@ Esta guía usa el archivo `render.yaml` del repositorio. Render crea el servicio
 
 1. Abre la URL del servicio (por ejemplo `https://consola-tlm.onrender.com`).
 2. Revisa `https://TU-URL/health`. Debe responder `"status":"online"`.
-3. En **Logs** busca estas dos líneas:
-   - `[Correo] OK: Conexión SMTP correcta...`
-   - `Servidor unificado ejecutándose...`
+3. En **Logs** busca `Servidor unificado ejecutándose...`. Si configuraste SMTP, también debe aparecer `[Correo] OK: Conexión SMTP correcta...`.
 4. Entra con `ADMIN_EMAIL` y `ADMIN_PASSWORD`.
 
 ## Paso 3: después del primer ingreso
@@ -53,7 +53,7 @@ Esta guía usa el archivo `render.yaml` del repositorio. Render crea el servicio
 |---|---|
 | `Falta ADMIN_PASSWORD` | Define `ADMIN_PASSWORD` en Environment y vuelve a desplegar |
 | `Falta SESSION_SECRET` | Define `SESSION_SECRET` (Render debería generarla sola) |
-| `No se pudo conectar a SMTP` | Revisa `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` y `SMTP_PASS` |
+| `No se pudo conectar a SMTP` | Si necesitas correos, revisa `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` y `SMTP_PASS`. SMTP es opcional; sin él, las solicitudes se aprueban manualmente. |
 | `Revisa DATABASE_URL en .env` | Revisa usuario, clave, host y `?sslmode=require` en la connection string |
 | Login responde 429 | Hay demasiados intentos fallidos. Espera 15 minutos |
 | Login responde 503 al recuperar clave | El correo no está configurado: revisa las variables `SMTP_*` |

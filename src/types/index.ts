@@ -70,6 +70,7 @@ export interface Usuario {
   verification_token?: string | null;
   token_expires_at?: string | null;
   email_verified?: boolean;
+  aprobacion_manual_sin_correo?: boolean;
   ultimo_cambio_password?: string;
 }
 
