@@ -25,6 +25,8 @@ Esta guía usa el archivo `render.yaml` del repositorio. Render crea el servicio
 | `SMTP_USER` | Usuario SMTP |
 | `SMTP_PASS` | Clave SMTP (en Gmail, una contraseña de aplicación) |
 | `SMTP_FROM` | Remitente, por ejemplo `Consola TLM <no-reply@tlm.net.co>` |
+| `APP_URL` | URL pública HTTPS si Render no proporciona `RENDER_EXTERNAL_URL` o usas un dominio propio |
+| `APROBADOR_REGISTRO_EMAIL` | Correos separados por coma que recibirán enlaces de aprobación; por defecto se usa `ADMIN_EMAIL` |
 
 `SESSION_SECRET` la genera Render sola. No la cambies salvo que tengas motivo.
 
@@ -62,3 +64,4 @@ Esta guía usa el archivo `render.yaml` del repositorio. Render crea el servicio
 - **Cuentas de demostración:** en producción no se crean. Solo existe el administrador que definiste en `ADMIN_EMAIL`. Las facturas y movimientos de ejemplo tampoco se cargan; empresas y plan de cuentas sí, para que la interfaz funcione.
 - **Si ya cargaste datos en la versión local:** la copia local no pasa a Render. Tendrás que volver a subir tus XML o cargarlos desde la app.
 - **Siigo y Google Cloud** siguen sin conexión real. La app lo informa en pantalla.
+- Los enlaces de verificación y aprobación tienen una página de confirmación; abrirlos no procesa la acción. Los de aprobación vencen en 72 horas.

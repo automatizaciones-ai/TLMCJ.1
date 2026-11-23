@@ -10,6 +10,9 @@ const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tlm-test-'));
 process.chdir(workDir);
 process.env.SESSION_SECRET = 'test-secret-para-pruebas';
 process.env.NODE_ENV = 'development';
+process.env.APP_URL = 'https://consola-tlm.test';
+process.env.APROBADOR_REGISTRO_EMAIL = 'juan.yaya@tlm.net.co,automatizaciones@tlm.net.co';
+process.env.DATABASE_URL = 'postgresql://test:test@127.0.0.1:1/tlm_test?sslmode=disable';
 
 // Servidor SMTP de prueba: guarda cada correo recibido en memoria
 const correos: string[] = [];
@@ -91,11 +94,15 @@ afterAll(() => {
 });
 
 // ---------- utilidades ----------
-async function api(p: string, opts: { method?: string; body?: unknown; cookie?: string; form?: FormData } = {}) {
+async function api(p: string, opts: { method?: string; body?: unknown; cookie?: string; form?: FormData; formEncoded?: Record<string, string> } = {}) {
   const headers: Record<string, string> = {};
   if (opts.cookie) headers.cookie = opts.cookie;
   let body: BodyInit | undefined;
   if (opts.form) body = opts.form;
+  else if (opts.formEncoded) {
+    headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    body = new URLSearchParams(opts.formEncoded);
+  }
   else if (opts.body !== undefined) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(opts.body);
@@ -296,13 +303,32 @@ describe('autenticación', () => {
     expect(usuario.verification_token).toBeUndefined();
     expect((await api(`/auth/usuarios/${usuario.id_usuario}/aprobar`, { method: 'PATCH', cookie: admin.cookie })).status).toBe(409);
 
-    const verificacion = await api(`/auth/register/verify?token=${token}`);
-    expect(verificacion.status).toBe(200);
+    expect(correoVerificacion).toContain('https://consola-tlm.test/api/v1/auth/register/verify?token=');
+    const paginaVerificacion = await api(`/auth/register/verify?token=${token}`);
+    expect(paginaVerificacion.status).toBe(200);
+    expect(paginaVerificacion.json).toContain('Confirmar correo');
+    const antesDeConfirmar = await api('/auth/usuarios', { cookie: admin.cookie });
+    expect(antesDeConfirmar.json.find((u: any) => u.email === email).email_verified).toBe(false);
+    const verificaciones = await Promise.all([
+      api('/auth/register/verify', { method: 'POST', formEncoded: { token: token! } }),
+      api('/auth/register/verify', { method: 'POST', formEncoded: { token: token! } })
+    ]);
+    expect(verificaciones.map(r => r.status).sort()).toEqual([200, 400]);
+    const verificacion = verificaciones.find(r => r.status === 200)!;
     expect(verificacion.json).toContain('Correo verificado');
     expect((await loginCon(email, 'Inicial2026x')).status).toBe(403);
 
-    const aprobacion = await api(`/auth/usuarios/${usuario.id_usuario}/aprobar`, { method: 'PATCH', cookie: admin.cookie });
-    expect(aprobacion.status).toBe(200);
+    const correoAprobacion = await esperarCorreo('juan.yaya@tlm.net.co', '/api/v1/auth/aprobar-por-correo?t=');
+    const tokenAprobacion = correoAprobacion.match(/\/api\/v1\/auth\/aprobar-por-correo\?t=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/)?.[1];
+    expect(tokenAprobacion).toBeTruthy();
+    const revisar = await api(`/auth/aprobar-por-correo?t=${encodeURIComponent(tokenAprobacion!)}`);
+    expect(revisar.status).toBe(200);
+    expect(revisar.json).toContain('Confirmar aprobación');
+    const aprobaciones = await Promise.all([
+      api('/auth/aprobar-por-correo', { method: 'POST', formEncoded: { t: tokenAprobacion! } }),
+      api('/auth/aprobar-por-correo', { method: 'POST', formEncoded: { t: tokenAprobacion! } })
+    ]);
+    expect(aprobaciones.map(r => r.status).sort()).toEqual([200, 409]);
     await esperarCorreo(email, 'Tu acceso a Consola TLM fue aprobado');
     const login = await loginCon(email, 'Inicial2026x');
     expect(login.status).toBe(200);
@@ -320,6 +346,49 @@ describe('autenticación', () => {
     });
     expect(cambio.status).toBe(200);
     expect((await loginCon(email, 'Personal2026x')).status).toBe(200);
+  });
+
+  test('el enlace firmado rechaza solo tras confirmación y no puede reutilizarse', async () => {
+    attempts.clearAttempts('registro:ip:127.0.0.1');
+    const admin = await loginCon('automatizaciones@tlm.net.co', 'admin_hashed_token');
+    expect(admin.status).toBe(200);
+    const email = 'solicitud.rechazo@cuenta-conocida.co';
+    const registro = await api('/auth/register', {
+      method: 'POST',
+      body: { nombre_completo: 'Solicitud Rechazo', email, password: 'Inicial2026x' }
+    });
+    expect(registro.status).toBe(201);
+
+    const correoVerificacion = await esperarCorreo(email, '/api/v1/auth/register/verify?token=');
+    const tokenVerificacion = correoVerificacion.match(/\/api\/v1\/auth\/register\/verify\?token=([a-f0-9]{64})/)?.[1];
+    expect(tokenVerificacion).toBeTruthy();
+    expect((await api(`/auth/register/verify?token=${tokenVerificacion}`)).status).toBe(200);
+    expect((await api('/auth/register/verify', {
+      method: 'POST',
+      formEncoded: { token: tokenVerificacion! }
+    })).status).toBe(200);
+
+    const correoAprobacion = await esperarCorreo('juan.yaya@tlm.net.co', 'hay una solicitud de acceso pendiente');
+    const tokenRechazo = correoAprobacion.match(/Rechazar: https:\/\/consola-tlm\.test\/api\/v1\/auth\/aprobar-por-correo\?t=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/)?.[1];
+    expect(tokenRechazo).toBeTruthy();
+    const revisar = await api(`/auth/aprobar-por-correo?t=${encodeURIComponent(tokenRechazo!)}`);
+    expect(revisar.status).toBe(200);
+    expect(revisar.json).toContain('Confirmar rechazo');
+
+    const antesDeRechazar = await api('/auth/usuarios', { cookie: admin.cookie });
+    expect(antesDeRechazar.json.some((u: any) => u.email === email)).toBe(true);
+    const rechazo = await api('/auth/aprobar-por-correo', {
+      method: 'POST',
+      formEncoded: { t: tokenRechazo! }
+    });
+    expect(rechazo.status).toBe(200);
+    await esperarCorreo(email, 'no fue aprobada');
+    const despuesDeRechazar = await api('/auth/usuarios', { cookie: admin.cookie });
+    expect(despuesDeRechazar.json.some((u: any) => u.email === email)).toBe(false);
+    expect((await api('/auth/aprobar-por-correo', {
+      method: 'POST',
+      formEncoded: { t: tokenRechazo! }
+    })).status).toBe(409);
   });
 });
 

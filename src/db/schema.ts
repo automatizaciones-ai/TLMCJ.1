@@ -1,4 +1,4 @@
-import { pgTable, serial, bigserial, text, integer, boolean, numeric, timestamp, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, serial, bigserial, text, integer, boolean, numeric, timestamp, jsonb, uniqueIndex } from 'drizzle-orm/pg-core';
 
 // 1. Usuarios & Autenticación (con soporte para Firebase Auth UID & IAM)
 export const users = pgTable('users', {
@@ -77,7 +77,9 @@ export const facturas = pgTable('facturas', {
   items: jsonb('items'),
   datosUbl: jsonb('datos_ubl'),
   createdAt: timestamp('created_at').defaultNow(),
-});
+}, table => [
+  uniqueIndex('facturas_id_empresa_cufe_hash_key').on(table.idEmpresa, table.cufeHash),
+]);
 
 // 4. Cuentas PUC (Plan Único de Cuentas)
 export const cuentasPuc = pgTable('cuentas_puc', {
