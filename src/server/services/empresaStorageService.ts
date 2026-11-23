@@ -471,9 +471,9 @@ class EmpresaStorageServiceImpl {
     }
   }
 
-  private async persistirArchivo(a: ArchivoEmpresa) {
+  private async persistirArchivo(a: ArchivoEmpresa, guardarCopia = true) {
     this.archivos.unshift(a);
-    this.guardarJson();
+    if (guardarCopia) this.guardarJson();
     if (this.pgDisponible) {
       await pool
         .query(
@@ -644,6 +644,115 @@ class EmpresaStorageServiceImpl {
     usuario?: string;
     forzar?: boolean;
   }): Promise<ResultadoArchivo> {
+    return this.archivarIndividual(params, true);
+  }
+
+  async archivarLote(paramsLote: {
+    empresa: EmpresaRef;
+    categoria: CategoriaArchivo;
+    nombre: string;
+    contenido?: Buffer;
+    rutaContenido?: string;
+    mime?: string;
+    periodo?: string;
+    usuario?: string;
+    forzar?: boolean;
+  }[]): Promise<ResultadoArchivo[]> {
+    if (!paramsLote.length) return [];
+
+    const primeros = paramsLote[0];
+    if (paramsLote.some(p => p.empresa.id_empresa !== primeros.empresa.id_empresa || p.categoria !== primeros.categoria)) {
+      throw new Error('El lote debe pertenecer a la misma empresa y categoría.');
+    }
+
+    const resultados: ResultadoArchivo[] = new Array(paramsLote.length);
+    const config = this.obtenerConfig(primeros.empresa.id_empresa);
+    const pendientes: { params: (typeof paramsLote)[number]; indice: number }[] = [];
+    paramsLote.forEach((params, indice) => {
+      if (params.forzar || config.archivado_automatico[params.categoria] !== false) {
+        pendientes.push({ params, indice });
+      } else {
+        resultados[indice] = { ok: true, omitido: true };
+      }
+    });
+    if (!pendientes.length) return resultados;
+
+    if ((config.estado !== 'CONECTADO' || !config.subcarpetas[primeros.categoria]) &&
+        (config.proveedor === 'LOCAL' || config.raiz_id)) {
+      try {
+        await this.inicializarEstructura(primeros.empresa, primeros.usuario);
+      } catch (err: any) {
+        const error = err?.message || String(err);
+        for (const { params, indice } of pendientes) {
+          console.warn(`[Almacenamiento] No se pudo archivar "${params.nombre}" para la empresa ${params.empresa.nit}:`, error);
+          resultados[indice] = { ok: false, error };
+        }
+        return resultados;
+      }
+    }
+
+    const configPreparada = this.obtenerConfig(primeros.empresa.id_empresa);
+    const carpetaCategoria = configPreparada.subcarpetas[primeros.categoria];
+    const carpetasPeriodo = new Map<string, string>();
+    if (configPreparada.proveedor !== 'LOCAL' && configPreparada.organizar_por_periodo && carpetaCategoria) {
+      const periodos = new Set(pendientes.map(({ params }) =>
+        params.periodo && /^\d{4}-\d{2}$/.test(params.periodo) ? params.periodo : periodoActual()
+      ));
+      try {
+        await Promise.all([...periodos].map(async periodo => {
+          const carpeta = await GoogleDriveClient.asegurarCarpeta(
+            carpetaCategoria,
+            periodo,
+            configPreparada.unidad_compartida_id
+          );
+          carpetasPeriodo.set(periodo, carpeta);
+        }));
+      } catch (err: any) {
+        const error = err?.message || String(err);
+        for (const { params, indice } of pendientes) {
+          console.warn(`[Almacenamiento] No se pudo archivar "${params.nombre}" para la empresa ${params.empresa.nit}:`, error);
+          resultados[indice] = { ok: false, error };
+        }
+        return resultados;
+      }
+    }
+
+    let siguiente = 0;
+    const trabajador = async () => {
+      while (siguiente < pendientes.length) {
+        const actual = pendientes[siguiente++];
+        const periodo = actual.params.periodo && /^\d{4}-\d{2}$/.test(actual.params.periodo)
+          ? actual.params.periodo
+          : periodoActual();
+        resultados[actual.indice] = await this.archivarIndividual(
+          actual.params,
+          false,
+          true,
+          carpetasPeriodo.get(periodo)
+        );
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, pendientes.length) }, () => trabajador()));
+    this.guardarJson();
+    return resultados;
+  }
+
+  private async archivarIndividual(
+    params: {
+      empresa: EmpresaRef;
+      categoria: CategoriaArchivo;
+      nombre: string;
+      contenido?: Buffer;
+      rutaContenido?: string;
+      mime?: string;
+      periodo?: string;
+      usuario?: string;
+      forzar?: boolean;
+    },
+    guardarCopia: boolean,
+    estructuraLista = false,
+    carpetaPeriodo?: string
+  ): Promise<ResultadoArchivo> {
     const { empresa, categoria } = params;
     let cfg = this.obtenerConfig(empresa.id_empresa);
     if (!params.forzar && cfg.archivado_automatico[categoria] === false) {
@@ -652,7 +761,7 @@ class EmpresaStorageServiceImpl {
 
     try {
       if (!params.contenido && !params.rutaContenido) throw new Error('Debe indicar el contenido o la ruta del archivo que se va a archivar.');
-      if (cfg.estado !== 'CONECTADO' || !cfg.subcarpetas[categoria]) {
+      if (!estructuraLista && (cfg.estado !== 'CONECTADO' || !cfg.subcarpetas[categoria])) {
         // Autoinicializa: en LOCAL siempre; en Drive solo si ya hay un destino definido
         if (cfg.proveedor === 'LOCAL' || cfg.raiz_id) {
           cfg = await this.inicializarEstructura(empresa, params.usuario);
@@ -698,7 +807,7 @@ class EmpresaStorageServiceImpl {
         const carpetaCategoria = cfg.subcarpetas[categoria];
         if (!carpetaCategoria) throw new Error('La estructura de carpetas de la empresa no está inicializada.');
         const padre = cfg.organizar_por_periodo
-          ? await GoogleDriveClient.asegurarCarpeta(carpetaCategoria, periodo, cfg.unidad_compartida_id)
+          ? carpetaPeriodo || await GoogleDriveClient.asegurarCarpeta(carpetaCategoria, periodo, cfg.unidad_compartida_id)
           : carpetaCategoria;
         const subido = params.contenido
           ? await GoogleDriveClient.subir(padre, nombre, params.contenido, mime)
@@ -722,7 +831,7 @@ class EmpresaStorageServiceImpl {
         creado_en: new Date().toISOString(),
         creado_por: params.usuario
       };
-      await this.persistirArchivo(archivo);
+      await this.persistirArchivo(archivo, guardarCopia);
       return { ok: true, archivo };
     } catch (err: any) {
       const mensaje = err?.message || String(err);

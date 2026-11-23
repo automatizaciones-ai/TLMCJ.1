@@ -159,6 +159,19 @@ async function subirXml(nombre: string, contenido: string) {
   return api('/facturas/upload', { method: 'POST', form, cookie: sesionAdmin });
 }
 
+async function generarPdf(texto: string): Promise<Buffer> {
+  const PDFDocument = (await import('pdfkit')).default;
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 40 });
+    const partes: Buffer[] = [];
+    doc.on('data', parte => partes.push(Buffer.from(parte)));
+    doc.on('end', () => resolve(Buffer.concat(partes)));
+    doc.on('error', reject);
+    doc.fontSize(12).text(texto, { lineGap: 4 });
+    doc.end();
+  });
+}
+
 let sesionAdmin = '';
 
 // ---------- 1. Unitarias: contraseñas y límite de intentos ----------
@@ -261,6 +274,53 @@ describe('autenticación', () => {
     const r = await api('/auth/register', { method: 'POST', body: { nombre_completo: 'Nuevo', email: 'nuevo@tlm.net.co' } });
     expect(r.status).toBe(400);
   });
+
+  test('el registro verifica el correo, requiere aprobación y fuerza cambiar la contraseña', async () => {
+    const email = 'solicitud.aprobacion@cuenta-conocida.co';
+    const admin = await loginCon('automatizaciones@tlm.net.co', 'admin_hashed_token');
+    expect(admin.status).toBe(200);
+    const registro = await api('/auth/register', {
+      method: 'POST',
+      body: { nombre_completo: 'Persona Conocida', email, password: 'Inicial2026x' }
+    });
+    expect(registro.status).toBe(201);
+    const correoVerificacion = await esperarCorreo(email, '/api/v1/auth/register/verify?token=');
+    await esperarCorreo('juan.yaya@tlm.net.co', 'solicitud de acceso:');
+    await esperarCorreo('automatizaciones@tlm.net.co', 'solicitud de acceso:');
+    const token = correoVerificacion.match(/\/api\/v1\/auth\/register\/verify\?token=([a-f0-9]{64})/)?.[1];
+    expect(token).toBeTruthy();
+
+    const usuarios = await api('/auth/usuarios', { cookie: admin.cookie });
+    const usuario = usuarios.json.find((u: any) => u.email === email);
+    expect(usuario.email_verified).toBe(false);
+    expect(usuario.verification_token).toBeUndefined();
+    expect((await api(`/auth/usuarios/${usuario.id_usuario}/aprobar`, { method: 'PATCH', cookie: admin.cookie })).status).toBe(409);
+
+    const verificacion = await api(`/auth/register/verify?token=${token}`);
+    expect(verificacion.status).toBe(200);
+    expect(verificacion.json).toContain('Correo verificado');
+    expect((await loginCon(email, 'Inicial2026x')).status).toBe(403);
+
+    const aprobacion = await api(`/auth/usuarios/${usuario.id_usuario}/aprobar`, { method: 'PATCH', cookie: admin.cookie });
+    expect(aprobacion.status).toBe(200);
+    await esperarCorreo(email, 'Tu acceso a Consola TLM fue aprobado');
+    const login = await loginCon(email, 'Inicial2026x');
+    expect(login.status).toBe(200);
+    expect(login.json.requiere_cambio_password).toBe(true);
+    expect((await api('/facturas', { cookie: login.cookie })).status).toBe(403);
+
+    const cambio = await api('/auth/cambiar-password', {
+      method: 'POST',
+      cookie: login.cookie,
+      body: {
+        password_actual: 'Inicial2026x',
+        nueva_password: 'Personal2026x',
+        confirmar_password: 'Personal2026x'
+      }
+    });
+    expect(cambio.status).toBe(200);
+    expect((await loginCon(email, 'Personal2026x')).status).toBe(200);
+  });
 });
 
 // ---------- 3. Recuperación de contraseña por correo ----------
@@ -352,7 +412,7 @@ describe('empresas', () => {
   });
 });
 
-describe('facturas XML (UBL)', () => {
+describe('carga de facturas XML, PDF y ZIP', () => {
   test('procesa 343 XML de un ZIP anidado, incluidas notas crédito', async () => {
     const zip = new JSZip();
     for (let i = 1; i <= 343; i++) {
@@ -379,6 +439,64 @@ describe('facturas XML (UBL)', () => {
     expect(documentos.some(d => d.factura_num === 'FE-ZIP-ANIDADA')).toBe(true);
   });
 
+  test('recibe 343 XML en una carga y conserva facturas y notas crédito', async () => {
+    const form = new FormData();
+    form.append('id_empresa', '1');
+    for (let i = 1; i <= 343; i++) {
+      const nota = i === 343;
+      const numero = `FE-MASIVA-${i}`;
+      form.append('archivos', new Blob([xmlFactura(numero, [1000], { root: nota ? 'CreditNote' : 'Invoice' })], { type: 'text/xml' }), `${numero}.xml`);
+    }
+
+    const resultado = await api('/facturas/upload', { method: 'POST', form, cookie: sesionAdmin });
+    expect(resultado.status).toBe(200);
+    expect(resultado.json.archivos_procesados).toBe(343);
+    expect(resultado.json.facturas_creadas).toBe(343);
+    expect(resultado.json.errores_lectura).toHaveLength(0);
+
+    const lista = await api('/facturas?id_empresa=1', { cookie: sesionAdmin });
+    expect(lista.json.find((f: any) => f.factura_num === 'FE-MASIVA-343')?.tipo_comprobante).toBe('Nota de Crédito');
+  });
+
+  test('interpreta facturas y notas crédito PDF individuales y guarda sus originales', async () => {
+    const crearTexto = (tipo: 'FACTURA ELECTRÓNICA DE VENTA' | 'NOTA CRÉDITO ELECTRÓNICA', numero: string) => [
+      tipo,
+      `No. ${numero}`,
+      'Fecha de emisión: 2026-03-10',
+      'EMISOR',
+      'Comercial Acme SAS',
+      'NIT: 900123456',
+      'ADQUIRIENTE',
+      'Empresa Receptora SAS',
+      'NIT: 901111111',
+      'Subtotal: $ 1.000,00',
+      'IVA: $ 190,00',
+      'Total factura: $ 1.190,00',
+      `CUFE: ${numero.replace(/[^a-z0-9]/gi, '').toLowerCase().padEnd(96, 'a')}`
+    ].join('\n');
+    const form = new FormData();
+    form.append('id_empresa', '1');
+    form.append('archivos', new Blob([await generarPdf(crearTexto('FACTURA ELECTRÓNICA DE VENTA', 'FE-PDF-1'))], { type: 'application/pdf' }), 'FE-PDF-1.pdf');
+    form.append('archivos', new Blob([await generarPdf(crearTexto('NOTA CRÉDITO ELECTRÓNICA', 'NC-PDF-1'))], { type: 'application/pdf' }), 'NC-PDF-1.pdf');
+    form.append('archivos', new Blob([xmlFactura('FE-PDF-MATCH', [1000])], { type: 'text/xml' }), 'FE-PDF-MATCH.xml');
+    form.append('archivos', new Blob([await generarPdf(crearTexto('FACTURA ELECTRÓNICA DE VENTA', 'FE-PDF-MATCH'))], { type: 'application/pdf' }), 'FE-PDF-MATCH.pdf');
+
+    const resultado = await api('/facturas/upload', { method: 'POST', form, cookie: sesionAdmin });
+    expect(resultado.status).toBe(200);
+    expect(resultado.json.facturas_creadas).toBe(3);
+    expect(resultado.json.pdfs_originales).toBe(3);
+    expect(resultado.json.errores_lectura).toHaveLength(0);
+
+    const lista = await api('/facturas?id_empresa=1', { cookie: sesionAdmin });
+    const factura = lista.json.find((f: any) => f.factura_num === 'FE-PDF-1');
+    const nota = lista.json.find((f: any) => f.factura_num === 'NC-PDF-1');
+    expect(factura?.tipo_comprobante).toBe('Factura Electrónica');
+    expect(factura?.subtotal).toBe(1000);
+    expect(nota?.tipo_comprobante).toBe('Nota de Crédito');
+    expect(nota?.subtotal).toBe(-1000);
+    expect(lista.json.filter((f: any) => f.factura_num === 'FE-PDF-MATCH')).toHaveLength(1);
+  });
+
   test('subtotal toma el total de cabecera, no la primera línea', async () => {
     const r = await subirXml('FE-1001.xml', xmlFactura('FE-1001', [1000000, 1000000]));
     expect(r.status).toBeLessThan(300);
@@ -401,6 +519,26 @@ describe('facturas XML (UBL)', () => {
     const lista = await api('/facturas?id_empresa=1', { cookie: sesionAdmin });
     expect(lista.json.some((x: any) => x.factura_num === 'MALO-1')).toBe(false);
     expect(r.json?.facturas_creadas ?? 0).toBe(0);
+  });
+
+  test('un archivo ilegible no impide cargar facturas y notas crédito válidas del mismo lote', async () => {
+    const zip = new JSZip();
+    zip.file('FE-en-zip.xml', xmlFactura('LOTE-FACTURA-ZIP', [2500]));
+    zip.file('nota-corrupta.xml', '<Invoice><cbc:ID>SIN-TOTALES</cbc:ID></Invoice>');
+    const zipValidoParcial = await zip.generateAsync({ type: 'nodebuffer' });
+    const form = new FormData();
+    form.append('id_empresa', '1');
+    form.append('archivos', new Blob([xmlFactura('LOTE-MIXTO-NC', [500], { root: 'CreditNote' })], { type: 'text/xml' }), 'LOTE-MIXTO-NC.xml');
+    form.append('archivos', new Blob([zipValidoParcial], { type: 'application/zip' }), 'lote-mixto.zip');
+
+    const resultado = await api('/facturas/upload', { method: 'POST', form, cookie: sesionAdmin });
+    expect(resultado.status).toBe(200);
+    expect(resultado.json.facturas_creadas).toBe(2);
+    expect(resultado.json.errores_lectura).toHaveLength(1);
+    expect(resultado.json.errores_lectura[0].nombre).toContain('nota-corrupta.xml');
+
+    const lista = await api('/facturas?id_empresa=1', { cookie: sesionAdmin });
+    expect(lista.json.find((f: any) => f.factura_num === 'LOTE-MIXTO-NC')?.tipo_comprobante).toBe('Nota de Crédito');
   });
 
   test('ids de factura únicos aunque se borre una y se suba otra', async () => {

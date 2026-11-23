@@ -248,6 +248,10 @@ export class CloudSqlService {
       `ALTER TABLE facturas ADD COLUMN IF NOT EXISTS id_reteica INTEGER`,
       `ALTER TABLE facturas ADD COLUMN IF NOT EXISTS id_reteiva INTEGER`,
       `ALTER TABLE empresas ADD COLUMN IF NOT EXISTS logo_url TEXT`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token TEXT`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMP`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT TRUE`,
+      `ALTER TABLE users ALTER COLUMN hashed_password TYPE TEXT`,
       `CREATE INDEX IF NOT EXISTS idx_facturas_empresa_cufe ON facturas (id_empresa, cufe_hash)`,
       `SELECT setval('users_id_seq', (SELECT GREATEST(COALESCE(max(id), 0), 20) FROM users))`,
       `SELECT setval('empresas_id_seq', (SELECT GREATEST(COALESCE(max(id), 0), 10) FROM empresas))`,
@@ -416,6 +420,9 @@ export class CloudSqlService {
                 requiereCambioPassword: Boolean(u.requiere_cambio_password),
                 permisos: u.permisos || getDefaultPermissions(u.rol),
                 avatarUrl: u.avatar_url || null,
+                verificationToken: u.verification_token || null,
+                tokenExpiresAt: u.token_expires_at ? new Date(u.token_expires_at) : null,
+                emailVerified: u.email_verified !== false,
               }).onConflictDoNothing();
             }
             console.log(`[CloudSQL] ${dump.usuarios.length} usuarios migrados a Cloud SQL.`);
@@ -576,7 +583,10 @@ export class CloudSqlService {
             empresas_ids: r.empresasIds || [1],
             permisos: (r.permisos as PermisosUsuario) || getDefaultPermissions(r.rol as any),
             avatar_url: r.avatarUrl,
-            requiere_cambio_password: r.requiereCambioPassword || false
+            requiere_cambio_password: r.requiereCambioPassword || false,
+            email_verified: r.emailVerified !== false,
+            verification_token: r.verificationToken || null,
+            token_expires_at: r.tokenExpiresAt?.toISOString() || null
           });
         }
       }
@@ -602,7 +612,10 @@ export class CloudSqlService {
         empresas_ids: r.empresasIds || [1],
         permisos: (r.permisos as PermisosUsuario) || getDefaultPermissions(r.rol as any),
         avatar_url: r.avatarUrl,
-        requiere_cambio_password: r.requiereCambioPassword || false
+        requiere_cambio_password: r.requiereCambioPassword || false,
+        email_verified: r.emailVerified !== false,
+        verification_token: r.verificationToken || null,
+        token_expires_at: r.tokenExpiresAt?.toISOString() || null
       };
     } catch (error) {
       console.error('[CloudSQL] Error getUsuarioById:', error);
@@ -626,7 +639,10 @@ export class CloudSqlService {
         empresas_ids: match.empresasIds || [1],
         permisos: (match.permisos as PermisosUsuario) || getDefaultPermissions(match.rol as any),
         avatar_url: match.avatarUrl,
-        requiere_cambio_password: match.requiereCambioPassword || false
+        requiere_cambio_password: match.requiereCambioPassword || false,
+        email_verified: match.emailVerified !== false,
+        verification_token: match.verificationToken || null,
+        token_expires_at: match.tokenExpiresAt?.toISOString() || null
       };
     } catch (error) {
       console.error('[CloudSQL] Error getUsuarioByEmail:', error);
@@ -646,7 +662,10 @@ export class CloudSqlService {
         empresasIds: data.empresas_ids || [1],
         requiereCambioPassword: Boolean(data.requiere_cambio_password),
         permisos: data.permisos || getDefaultPermissions((data.rol || 'Analista') as any),
-        avatarUrl: data.avatar_url || null
+        avatarUrl: data.avatar_url || null,
+        verificationToken: data.verification_token || null,
+        tokenExpiresAt: data.token_expires_at ? new Date(data.token_expires_at) : null,
+        emailVerified: data.email_verified !== false
       }).returning();
 
       const r = inserted[0];
@@ -660,7 +679,10 @@ export class CloudSqlService {
         empresas_ids: r.empresasIds || [1],
         permisos: (r.permisos as PermisosUsuario) || getDefaultPermissions(r.rol as any),
         avatar_url: r.avatarUrl,
-        requiere_cambio_password: r.requiereCambioPassword || false
+        requiere_cambio_password: r.requiereCambioPassword || false,
+        email_verified: r.emailVerified !== false,
+        verification_token: r.verificationToken || null,
+        token_expires_at: r.tokenExpiresAt?.toISOString() || null
       };
     } catch (error) {
       console.error('[CloudSQL] Error createUsuario:', error);
@@ -680,6 +702,9 @@ export class CloudSqlService {
       if (data.avatar_url !== undefined) updatePayload.avatarUrl = data.avatar_url;
       if (data.hashed_password !== undefined) updatePayload.hashedPassword = data.hashed_password;
       if (data.requiere_cambio_password !== undefined) updatePayload.requiereCambioPassword = data.requiere_cambio_password;
+      if (data.email_verified !== undefined) updatePayload.emailVerified = data.email_verified;
+      if (data.verification_token !== undefined) updatePayload.verificationToken = data.verification_token;
+      if (data.token_expires_at !== undefined) updatePayload.tokenExpiresAt = data.token_expires_at ? new Date(data.token_expires_at) : null;
 
       const updated = await drizzleDb.update(schema.users)
         .set(updatePayload)
@@ -698,7 +723,10 @@ export class CloudSqlService {
         empresas_ids: r.empresasIds || [1],
         permisos: (r.permisos as PermisosUsuario) || getDefaultPermissions(r.rol as any),
         avatar_url: r.avatarUrl,
-        requiere_cambio_password: r.requiereCambioPassword || false
+        requiere_cambio_password: r.requiereCambioPassword || false,
+        email_verified: r.emailVerified !== false,
+        verification_token: r.verificationToken || null,
+        token_expires_at: r.tokenExpiresAt?.toISOString() || null
       };
     } catch (error) {
       console.error('[CloudSQL] Error updateUsuario:', error);

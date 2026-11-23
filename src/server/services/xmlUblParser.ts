@@ -5,6 +5,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import * as yauzl from 'yauzl';
 import JSZip from 'jszip';
+import { parsearFecha, parsearMonto, textoLineasPdf, textoLineasPdfOcr } from './lectorArchivosContables.ts';
 
 export interface ParteUbl {
   nit: string;
@@ -69,7 +70,7 @@ export interface ParsedXmlInvoice {
   cufe_hash: string;
   estado_revision: 'PENDIENTE' | 'AUDITADA';
   items: LineaUbl[];
-  /** PDF de la representación gráfica que venía en el mismo paquete (.zip) que el XML */
+  /** PDF original asociado al comprobante. */
   pdf_original?: { nombre: string; contenido: Buffer };
   datos_ubl: {
     emisor: ParteUbl;
@@ -82,6 +83,140 @@ export interface ParsedXmlInvoice {
 }
 
 const normalizarNombre = (s: string) => (s || '').toLowerCase().replace(/\.[a-z0-9]+$/, '').replace(/[^a-z0-9]/g, '');
+const normalizarPdf = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+function valorDespuesDeEtiqueta(lineas: string[], etiqueta: RegExp): string {
+  for (let i = lineas.length - 1; i >= 0; i--) {
+    const coincidencia = etiqueta.exec(lineas[i]);
+    if (!coincidencia || coincidencia.index === undefined) continue;
+    const mismoRenglon = lineas[i].slice(coincidencia.index + coincidencia[0].length).replace(/^[\s:#-]+/, '').trim();
+    if (mismoRenglon) return mismoRenglon;
+    for (let siguiente = i + 1; siguiente < Math.min(lineas.length, i + 3); siguiente++) {
+      if (lineas[siguiente].trim()) return lineas[siguiente].trim();
+    }
+  }
+  return '';
+}
+
+function montoDespuesDeEtiqueta(lineas: string[], etiqueta: RegExp): number {
+  const monto = /-?\$?\s*\d[\d.,\s]*(?:\d)/;
+  for (let i = lineas.length - 1; i >= 0; i--) {
+    const coincidencia = etiqueta.exec(lineas[i]);
+    if (!coincidencia || coincidencia.index === undefined) continue;
+    const resto = lineas[i].slice(coincidencia.index + coincidencia[0].length);
+    const valor = resto.match(monto) || lineas.slice(i + 1, i + 3).join(' ').match(monto);
+    if (valor) {
+      const resultado = parsearMonto(valor[0]);
+      if (resultado !== 0) return resultado;
+    }
+  }
+  return 0;
+}
+
+function extraerPartePdf(lineas: string[], rol: 'emisor' | 'adquiriente'): ParteUbl {
+  const esEmisor = rol === 'emisor';
+  const rolRegex = esEmisor ? /\b(?:emisor|vendedor|proveedor)\b/i : /\b(?:adquirente|adquiriente|comprador|cliente)\b/i;
+  const otroRolRegex = esEmisor ? /\b(?:adquirente|adquiriente|comprador|cliente)\b/i : /\b(?:emisor|vendedor|proveedor)\b/i;
+  const indiceRol = lineas.findIndex(linea => rolRegex.test(normalizarPdf(linea)));
+  const indiceSiguienteRol = lineas.findIndex((linea, i) => i > indiceRol && otroRolRegex.test(normalizarPdf(linea)));
+  const indiceFin = indiceSiguienteRol > indiceRol ? indiceSiguienteRol : Math.min(lineas.length, indiceRol + 8);
+  const bloqueParte = indiceRol < 0
+    ? lineas
+    : lineas.slice(indiceRol, indiceFin);
+  const nitRegex = /\b(?:n\.?\s*i\.?\s*t\.?|identificacion(?:\s+tributaria)?)\s*[:#-]?\s*([\d][\d.\s-]{5,15})/i;
+  const coincidenciaNit = bloqueParte.map(linea => linea.match(nitRegex)).find(Boolean)
+    || lineas.map(linea => linea.match(nitRegex)).filter(Boolean)[esEmisor ? 0 : 1];
+  const nit = soloDigitos(coincidenciaNit?.[1] || '');
+  const candidatosNombre = indiceRol < 0 ? [] : bloqueParte.slice(0, 5);
+  const nombre = candidatosNombre
+    .map(linea => linea.replace(rolRegex, '').replace(/^[\s:#-]+/, '').trim())
+    .find(linea => linea.length > 2 && !nitRegex.test(linea) && !/\b(?:nit|direccion|telefono|correo|fecha|factura|nota credito)\b/i.test(normalizarPdf(linea)))
+    || '';
+  return { nit, razon_social: nombre };
+}
+
+async function parsearPdfFactura(contenido: Buffer, fileName: string, nitEmpresaActiva: string): Promise<ParsedXmlInvoice[]> {
+  if (contenido.subarray(0, 5).toString('latin1') !== '%PDF-') {
+    throw new Error('El archivo no contiene una cabecera PDF válida.');
+  }
+
+  let lineas = await textoLineasPdf(contenido);
+  if (lineas.join('').trim().length < 20) lineas = await textoLineasPdfOcr(contenido);
+  const texto = lineas.join('\n');
+  const normalizado = normalizarPdf(texto);
+  const esNotaCredito = /\bnota\s+(?:de\s+)?credito\b|\bcredit\s+note\b/.test(normalizado.slice(0, 5000));
+  const emisor = extraerPartePdf(lineas, 'emisor');
+  const adquiriente = extraerPartePdf(lineas, 'adquiriente');
+  const numero = texto.match(/^\s*(?:no\.?|n[uú]mero(?:\s+de\s+(?:factura|nota))?|consecutivo)\s*[:#-]?\s*([A-Z0-9][\w./-]{1,34})\s*$/im)?.[1]
+    || texto.match(/(?:factura|nota\s+(?:de\s+)?credito)[^\n]{0,80}?\b(?:no\.?|numero|n[uú]mero)\s*[:#-]?\s*([A-Z0-9][\w./-]{1,34})/i)?.[1]
+    || valorDespuesDeEtiqueta(lineas, /(?:numero\s+de\s+(?:factura|nota)|no\.?\s*(?:de\s+)?(?:factura|nota)?|consecutivo)\b/i);
+  const fechaRaw = valorDespuesDeEtiqueta(lineas, /fecha\s+(?:de\s+)?(?:emision|expedicion|generacion|factura)\b/i);
+  const fechaEncontrada = texto.match(/\b(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]20\d{2})\b/)?.[1];
+  const fecha = parsearFecha(fechaRaw) || (fechaEncontrada ? parsearFecha(fechaEncontrada) : '');
+  const subtotal = Math.abs(montoDespuesDeEtiqueta(lineas, /\b(?:subtotal|base\s+gravable|valor\s+antes\s+de\s+impuestos)\b/i));
+  const iva = Math.abs(montoDespuesDeEtiqueta(lineas, /\b(?:iva|impuesto\s+al\s+valor\s+agregado)\b/i));
+  const total = Math.abs(montoDespuesDeEtiqueta(lineas, /\b(?:total\s+(?:a\s+pagar|factura|documento)|valor\s+total|total\s+neto)\b/i));
+  const nitEmpresa = soloDigitos(nitEmpresaActiva);
+  const tipo_operacion: 'VENTA' | 'COMPRA' = nitEmpresa && emisor.nit === nitEmpresa ? 'VENTA' : 'COMPRA';
+  const tercero = tipo_operacion === 'VENTA' ? adquiriente : emisor;
+
+  if (!emisor.nit || !emisor.razon_social) {
+    throw new Error('El PDF no permite identificar al emisor (razón social y NIT).');
+  }
+  if (!subtotal && !total) throw new Error('El PDF no permite identificar el subtotal o total de la factura.');
+
+  const subtotalFinal = subtotal || Math.max(0, total - iva);
+  const ivaFinal = iva || Math.max(0, total - subtotalFinal);
+  const totalFinal = total || subtotalFinal + ivaFinal;
+  const signo = esNotaCredito ? -1 : 1;
+  const descripcion = esNotaCredito ? 'Nota de crédito según representación PDF' : 'Factura según representación PDF';
+  const cufe = texto.match(/\b(?:cufe|cude)\b\s*[:#-]?\s*([a-f0-9]{32,})/i)?.[1]
+    || crypto.createHash('sha256').update(contenido).digest('hex');
+  const montoLinea = signo * subtotalFinal;
+  const factura: ParsedXmlInvoice = {
+    factura_num: numero.trim() || path.basename(fileName).replace(/\.[^.]+$/, ''),
+    fecha: fecha || 'SIN_FECHA',
+    tipo_operacion,
+    proveedor: tercero.razon_social || 'TERCERO NO IDENTIFICADO',
+    nit_tercero: tercero.nit || 'N/A',
+    descripcion_item: descripcion,
+    cantidad: 1,
+    valor_unitario: montoLinea,
+    subtotal: montoLinea,
+    iva: signo * ivaFinal,
+    total: signo * totalFinal,
+    casilla_350: 64,
+    retencion_porc: 0,
+    retencion_valor: 0,
+    reteica_tarifa: 0,
+    reteiva_porc: 0,
+    forma_pago: /\bcontado\b/i.test(normalizado) ? 'Contado' : 'Crédito',
+    medio_pago: 'Transferencia Débito',
+    cuenta_gasto: tipo_operacion === 'VENTA' ? '41350101' : '519530',
+    tipo_comprobante: esNotaCredito ? 'Nota de Crédito' : 'Factura Electrónica',
+    cufe_hash: cufe,
+    estado_revision: 'PENDIENTE',
+    items: [{
+      linea: 1,
+      descripcion_item: descripcion,
+      cantidad: 1,
+      valor_unitario: montoLinea,
+      descuento: 0,
+      subtotal: montoLinea,
+      iva: signo * ivaFinal,
+      iva_porc: subtotalFinal ? Math.round((ivaFinal / subtotalFinal) * 100) : 0,
+      inc: 0
+    }],
+    pdf_original: { nombre: path.basename(fileName), contenido },
+    datos_ubl: {
+      emisor,
+      adquiriente,
+      moneda: 'COP',
+      archivo_origen: fileName
+    }
+  };
+  return [factura];
+}
 
 /**
  * Asigna a cada documento el PDF que le corresponde dentro del mismo paquete:
@@ -238,20 +373,33 @@ function parsearLineas(xml: string, esNotaCredito: boolean): LineaUbl[] {
 
 export class XmlUblParserService {
   /**
-   * Main entry point for processing uploaded buffers (supports both direct XML and ZIP packages)
+   * Main entry point for processing invoice XML, PDF and ZIP uploads.
    */
-  public async parseFileBuffer(buffer: Buffer, fileName: string = "factura.xml", nitEmpresaActiva: string = ""): Promise<ParsedXmlInvoice[]> {
+  public async parseFileBuffer(
+    buffer: Buffer,
+    fileName: string = "factura.xml",
+    nitEmpresaActiva: string = "",
+    erroresLectura: { nombre: string; error: string }[] = []
+  ): Promise<ParsedXmlInvoice[]> {
     const isZip = fileName.toLowerCase().endsWith('.zip') ||
                   (buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04);
 
     if (isZip) {
-      return this.parseZipBuffer(buffer, fileName, nitEmpresaActiva);
+      return this.parseZipBuffer(buffer, fileName, nitEmpresaActiva, erroresLectura);
+    }
+    if (fileName.toLowerCase().endsWith('.pdf') || buffer.subarray(0, 5).toString('latin1') === '%PDF-') {
+      return parsearPdfFactura(buffer, fileName, nitEmpresaActiva);
     }
 
     return this.parseXmlUbl(this.bufferATexto(buffer), fileName, nitEmpresaActiva);
   }
 
-  public async parseFilePath(filePath: string, fileName: string = "factura.xml", nitEmpresaActiva: string = ""): Promise<ParsedXmlInvoice[]> {
+  public async parseFilePath(
+    filePath: string,
+    fileName: string = "factura.xml",
+    nitEmpresaActiva: string = "",
+    erroresLectura: { nombre: string; error: string }[] = []
+  ): Promise<ParsedXmlInvoice[]> {
     const handle = await fs.promises.open(filePath, 'r');
     let signature: Buffer;
     try {
@@ -263,12 +411,20 @@ export class XmlUblParserService {
 
     const isZip = fileName.toLowerCase().endsWith('.zip') ||
       (signature[0] === 0x50 && signature[1] === 0x4B && signature[2] === 0x03 && signature[3] === 0x04);
-    if (isZip) return this.parseZipFilePath(filePath, fileName, nitEmpresaActiva);
+    if (isZip) return this.parseZipFilePath(filePath, fileName, nitEmpresaActiva, erroresLectura);
+    if (fileName.toLowerCase().endsWith('.pdf') || signature.subarray(0, 4).toString('latin1') === '%PDF') {
+      return parsearPdfFactura(await fs.promises.readFile(filePath), fileName, nitEmpresaActiva);
+    }
 
     return this.parseXmlUbl(this.bufferATexto(await fs.promises.readFile(filePath)), fileName, nitEmpresaActiva);
   }
 
-  private async parseZipFilePath(zipPath: string, zipFileName: string, nitEmpresaActiva: string): Promise<ParsedXmlInvoice[]> {
+  private async parseZipFilePath(
+    zipPath: string,
+    zipFileName: string,
+    nitEmpresaActiva: string,
+    erroresLectura: { nombre: string; error: string }[]
+  ): Promise<ParsedXmlInvoice[]> {
     const results: ParsedXmlInvoice[] = [];
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'tlm-zip-'));
     const pendientes: { filePath: string; nombre: string }[] = [{ filePath: zipPath, nombre: zipFileName }];
@@ -283,6 +439,10 @@ export class XmlUblParserService {
         } catch (err) {
           if (actual.filePath === zipPath) throw err;
           console.warn(`[XML-Parser] No se pudo abrir el ZIP anidado "${actual.nombre}":`, err);
+          erroresLectura.push({
+            nombre: `${zipFileName} → ${actual.nombre}`,
+            error: err instanceof Error ? err.message : String(err)
+          });
           continue;
         }
 
@@ -305,7 +465,14 @@ export class XmlUblParserService {
               if (esXml) {
                 const chunks: Buffer[] = [];
                 for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-                propios.push(...this.parseXmlUbl(this.bufferATexto(Buffer.concat(chunks)), entry.fileName, nitEmpresaActiva));
+                const facturas = this.parseXmlUbl(this.bufferATexto(Buffer.concat(chunks)), entry.fileName, nitEmpresaActiva);
+                if (!facturas.length) {
+                  erroresLectura.push({
+                    nombre: `${zipFileName} → ${entry.fileName}`,
+                    error: 'No se encontró una factura o nota crédito UBL válida en el XML.'
+                  });
+                }
+                propios.push(...facturas);
               } else if (esPdf) {
                 const chunks: Buffer[] = [];
                 for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -318,6 +485,10 @@ export class XmlUblParserService {
               }
             } catch (err) {
               console.warn(`[XML-Parser] Error extrayendo "${entry.fileName}" dentro de ${actual.nombre}:`, err);
+              erroresLectura.push({
+                nombre: `${zipFileName} → ${entry.fileName}`,
+                error: err instanceof Error ? err.message : String(err)
+              });
             }
           }
         } finally {
@@ -325,6 +496,19 @@ export class XmlUblParserService {
         }
 
         emparejarPdfs(propios, pdfs);
+        if (!propios.length) {
+          for (const pdf of pdfs) {
+            try {
+              propios.push(...await parsearPdfFactura(pdf.contenido, pdf.nombre, nitEmpresaActiva));
+            } catch (err) {
+              console.warn(`[XML-Parser] No se pudo interpretar el PDF "${pdf.nombre}" dentro de ${actual.nombre}:`, err);
+              erroresLectura.push({
+                nombre: `${zipFileName} → ${pdf.nombre}`,
+                error: err instanceof Error ? err.message : String(err)
+              });
+            }
+          }
+        }
         results.push(...propios);
         for (let i = zipsInternos.length - 1; i >= 0; i--) pendientes.push(zipsInternos[i]);
         console.log(`[XML-Parser] ZIP "${actual.nombre}": ${propios.length} documentos UBL extraídos.`);
@@ -350,7 +534,12 @@ export class XmlUblParserService {
   /**
    * Unpacks a ZIP archive and extracts all contained XML invoices (also nested ZIPs, as sent by many DIAN providers)
    */
-  public async parseZipBuffer(zipBuffer: Buffer, zipFileName: string, nitEmpresaActiva: string = ""): Promise<ParsedXmlInvoice[]> {
+  public async parseZipBuffer(
+    zipBuffer: Buffer,
+    zipFileName: string,
+    nitEmpresaActiva: string = "",
+    erroresLectura: { nombre: string; error: string }[] = []
+  ): Promise<ParsedXmlInvoice[]> {
     const results: ParsedXmlInvoice[] = [];
     const pendientes: { buffer: Buffer; nombre: string }[] = [{ buffer: zipBuffer, nombre: zipFileName }];
 
@@ -368,7 +557,14 @@ export class XmlUblParserService {
           try {
             if (lower.endsWith('.xml')) {
               const fileData = await zip.files[entryName].async('nodebuffer');
-              propios.push(...this.parseXmlUbl(this.bufferATexto(fileData), entryName, nitEmpresaActiva));
+              const facturas = this.parseXmlUbl(this.bufferATexto(fileData), entryName, nitEmpresaActiva);
+              if (!facturas.length) {
+                erroresLectura.push({
+                  nombre: `${zipFileName} → ${entryName}`,
+                  error: 'No se encontró una factura o nota crédito UBL válida en el XML.'
+                });
+              }
+              propios.push(...facturas);
             } else if (lower.endsWith('.pdf')) {
               const contenido = await zip.files[entryName].async('nodebuffer');
               if (contenido.subarray(0, 5).toString('latin1') === '%PDF-') pdfs.push({ nombre: entryName.split('/').pop()!, contenido });
@@ -378,15 +574,36 @@ export class XmlUblParserService {
             }
           } catch (err) {
             console.warn(`[XML-Parser] Error extrayendo "${entryName}" dentro de ${actual.nombre}:`, err);
+            erroresLectura.push({
+              nombre: `${zipFileName} → ${entryName}`,
+              error: err instanceof Error ? err.message : String(err)
+            });
           }
         }
 
         emparejarPdfs(propios, pdfs);
+        if (!propios.length) {
+          for (const pdf of pdfs) {
+            try {
+              propios.push(...await parsearPdfFactura(pdf.contenido, pdf.nombre, nitEmpresaActiva));
+            } catch (err) {
+              console.warn(`[XML-Parser] No se pudo interpretar el PDF "${pdf.nombre}" dentro de ${actual.nombre}:`, err);
+              erroresLectura.push({
+                nombre: `${zipFileName} → ${pdf.nombre}`,
+                error: err instanceof Error ? err.message : String(err)
+              });
+            }
+          }
+        }
         results.push(...propios);
         for (let i = zipsInternos.length - 1; i >= 0; i--) pendientes.push(zipsInternos[i]);
         console.log(`[XML-Parser] ZIP "${actual.nombre}": ${propios.length} documentos UBL extraídos, ${propios.filter(r => r.pdf_original).length} con PDF original.`);
       } catch (zipErr) {
         console.error(`[XML-Parser] Error leyendo archivo ZIP ${actual.nombre}:`, zipErr);
+        erroresLectura.push({
+          nombre: actual.nombre,
+          error: zipErr instanceof Error ? zipErr.message : String(zipErr)
+        });
       }
     }
     return results;

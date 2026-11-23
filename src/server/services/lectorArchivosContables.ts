@@ -441,7 +441,7 @@ export async function textoLineasPdf(buffer: Buffer): Promise<string[]> {
 }
 
 /** Renderiza las páginas con MuPDF y recupera las columnas con OCR cuando el PDF no trae movimientos legibles. */
-async function textoLineasPdfOcr(buffer: Buffer): Promise<string[]> {
+export async function textoLineasPdfOcr(buffer: Buffer): Promise<string[]> {
   const [{ default: mupdf }, { createWorker, PSM }] = await Promise.all([
     import('mupdf'),
     import('tesseract.js')

@@ -36,6 +36,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [correoPendienteVerificacion, setCorreoPendienteVerificacion] = useState('');
 
   // Forced Password Change State (First login with provisional password)
   const [mustChangeUser, setMustChangeUser] = useState<Usuario | null>(null);
@@ -448,17 +449,52 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       const data = await res.json();
       if (!res.ok) {
+        if (data.registro_creado) {
+          setCorreoPendienteVerificacion(email.trim());
+          setEmail(email.trim());
+          setPassword('');
+          setNombreCompleto('');
+          setTab('login');
+          setErrorMsg(data.detail || 'La solicitud se guardó, pero el correo no pudo enviarse.');
+          onRefreshUsers();
+          return;
+        }
         throw new Error(data.detail || 'Error al registrar usuario');
       }
 
       onShowToast(data.mensaje || 'Registro completado. Cuenta en cola de aprobación.');
       onRefreshUsers();
+      setCorreoPendienteVerificacion(email.trim());
       setTab('login');
-      setEmail('');
+      setEmail(email.trim());
       setPassword('');
       setNombreCompleto('');
     } catch (err: any) {
       setErrorMsg(err.message || 'Error de registro');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    const correo = (correoPendienteVerificacion || email).trim();
+    if (!correo) {
+      setErrorMsg('Ingresa el correo usado en el registro.');
+      return;
+    }
+    setIsLoading(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch('/api/v1/auth/register/resend-verification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: correo })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'No se pudo reenviar la verificación.');
+      onShowToast(data.mensaje || 'Se enviaron nuevamente las instrucciones.', 'info');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'No se pudo reenviar la verificación.');
     } finally {
       setIsLoading(false);
     }
@@ -753,6 +789,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </button>
                 </div>
               </div>
+
+              {correoPendienteVerificacion && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 space-y-2">
+                  <p>Para continuar con la solicitud, confirma que tienes acceso al correo. Después, un administrador revisará y aprobará la cuenta.</p>
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={handleResendVerification}
+                    className="font-bold underline cursor-pointer disabled:opacity-50"
+                  >
+                    {isLoading ? 'Enviando...' : 'Reenviar verificación a este correo'}
+                  </button>
+                </div>
+              )}
 
               <div className="pt-1">
                 <button

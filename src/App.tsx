@@ -35,7 +35,10 @@ type ResultadoCargaLote = {
   pdfs_originales?: number;
   ventas?: number;
   compras?: number;
+  ventas_nuevas?: number;
+  compras_nuevas?: number;
   archivados?: { ok: boolean }[];
+  errores_lectura?: { nombre: string; error: string; indice?: number }[];
 };
 
 type ErrorCarga = Error & { retryable?: boolean };
@@ -387,10 +390,10 @@ export default function App() {
   };
 
   // Actions
-  const handleUploadXml = async (files: FileList): Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number }> => {
+  const handleUploadXml = async (files: FileList): Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number; errores_lectura: { nombre: string; error: string }[] }> => {
     const archivos = Array.from(files);
-    let archivosConfirmados = 0;
-    const archivosFallidos: { nombre: string; error: string }[] = [];
+    const archivosConfirmados = new Set<File>();
+    const erroresPorArchivo = new Map<File, { nombre: string; error: string }[]>();
     try {
       const lotes = crearLotesArchivos(archivos);
       const total = {
@@ -402,10 +405,11 @@ export default function App() {
         pdfs_originales: 0,
         ventas: 0,
         compras: 0,
-        fallos_archivado: 0
+        fallos_archivado: 0,
+        errores_lectura: [] as { nombre: string; error: string }[]
       };
 
-      const enviarLote = async (lote: File[]): Promise<void> => {
+      const enviarLote = async (lote: File[], reintentarLectura = true, intento = 0): Promise<void> => {
         const formData = new FormData();
         formData.append('id_empresa', (activeEmpresa?.id_empresa || 1).toString());
         lote.forEach(file => formData.append('archivos', file));
@@ -438,37 +442,60 @@ export default function App() {
             throw error;
           }
 
-          total.archivos_procesados += procesados;
-          archivosConfirmados += procesados;
+          lote.forEach(file => archivosConfirmados.add(file));
           total.xmls_extraidos += Number(data.xmls_extraidos ?? 0);
           total.facturas_creadas += Number(data.facturas_creadas ?? 0);
           total.facturas_duplicadas += Number(data.facturas_duplicadas ?? 0);
           total.facturas_nuevas += Number(data.facturas_nuevas ?? 0);
           total.pdfs_originales += Number(data.pdfs_originales ?? 0);
-          total.ventas += Number(data.ventas ?? 0);
-          total.compras += Number(data.compras ?? 0);
+          total.ventas += Number(data.ventas_nuevas ?? data.ventas ?? 0);
+          total.compras += Number(data.compras_nuevas ?? data.compras ?? 0);
           total.fallos_archivado += (data.archivados || []).filter((a: any) => !a.ok).length;
+          const erroresDelLote = new Map<File, { nombre: string; error: string }[]>();
+          for (const errorLectura of data.errores_lectura || []) {
+            const indice = Number(errorLectura.indice);
+            const archivo = Number.isInteger(indice) && indice >= 0
+              ? lote[indice]
+              : lote.find(file => file.name === errorLectura.nombre);
+            if (!archivo) continue;
+            const detalles = erroresDelLote.get(archivo) || [];
+            detalles.push({ nombre: errorLectura.nombre, error: errorLectura.error });
+            erroresDelLote.set(archivo, detalles);
+          }
+          for (const [archivo, detalles] of erroresDelLote) {
+            if (reintentarLectura) {
+              await enviarLote([archivo], false, 1);
+            } else {
+              const existentes = erroresPorArchivo.get(archivo) || [];
+              erroresPorArchivo.set(archivo, [...existentes, ...detalles]);
+            }
+          }
         } catch (err) {
           const error: ErrorCarga = err instanceof Error ? err as ErrorCarga : new Error('Error desconocido.') as ErrorCarga;
           if (err instanceof TypeError) error.retryable = true;
           if (error.retryable && lote.length > 1) {
             const mitad = Math.ceil(lote.length / 2);
-            await enviarLote(lote.slice(0, mitad));
-            await enviarLote(lote.slice(mitad));
+            await enviarLote(lote.slice(0, mitad), reintentarLectura);
+            await enviarLote(lote.slice(mitad), reintentarLectura);
+          } else if (error.retryable && intento === 0) {
+            await enviarLote(lote, false, 1);
           } else {
-            archivosFallidos.push(...lote.map(file => ({ nombre: file.name, error: error.message })));
+            lote.forEach(file => erroresPorArchivo.set(file, [{ nombre: file.name, error: error.message }]));
           }
         }
       };
 
       for (const lote of lotes) await enviarLote(lote);
 
-      if (archivosFallidos.length) {
-        const detalle = archivosFallidos.slice(0, 3).map(a => `${a.nombre}: ${a.error}`).join('; ');
-        const restantes = archivosFallidos.length > 3 ? `; y ${archivosFallidos.length - 3} más` : '';
-        showToast(`Se cargaron ${total.archivos_procesados} de ${archivos.length} archivos. ${archivosFallidos.length} no se pudieron procesar: ${detalle}${restantes}`, 'error');
+      total.archivos_procesados = archivosConfirmados.size;
+      const erroresCarga = [...erroresPorArchivo.values()].flat();
+      total.errores_lectura = erroresCarga;
+      if (erroresCarga.length) {
+        showToast(`Se revisaron ${total.archivos_procesados} de ${archivos.length} archivos y se registraron ${total.facturas_nuevas} documento(s) nuevo(s). ${erroresCarga.length} archivo(s) siguen sin poder interpretarse; consulte la lista de errores.`, 'error');
+      } else if (total.facturas_nuevas > 0) {
+        showToast(`Se procesaron ${total.archivos_procesados} archivo(s): ${total.facturas_nuevas} facturas nuevas (${total.ventas} ventas, ${total.compras} compras)${total.fallos_archivado ? `. ${total.fallos_archivado} original(es) no se pudieron guardar en la carpeta de la empresa` : '. Originales guardados en la carpeta de la empresa'}.`, total.fallos_archivado ? 'info' : 'success');
       } else if (total.facturas_creadas > 0) {
-        showToast(`Se procesaron ${total.archivos_procesados} archivo(s): ${total.facturas_creadas} facturas (${total.ventas} ventas, ${total.compras} compras)${total.fallos_archivado ? `. ${total.fallos_archivado} original(es) no se pudieron guardar en la carpeta de la empresa` : '. Originales guardados en la carpeta de la empresa'}.`, total.fallos_archivado ? 'info' : 'success');
+        showToast(`Se procesaron ${total.archivos_procesados} archivo(s); los documentos encontrados ya estaban cargados (${total.facturas_duplicadas} duplicados omitidos).`, 'info');
       } else {
         showToast(`Se procesaron ${total.archivos_procesados} archivo(s), pero no se detectaron nuevas facturas válidas.`, 'info');
       }
@@ -478,7 +505,7 @@ export default function App() {
       };
     } catch (err) {
       const detalle = err instanceof Error ? err.message : 'Error desconocido.';
-      showToast(`Error procesando archivos XML / ZIP (${archivosConfirmados} de ${archivos.length} confirmados): ${detalle}`, 'error');
+      showToast(`Error procesando archivos (${archivosConfirmados.size} de ${archivos.length} confirmados): ${detalle}`, 'error');
       throw err instanceof Error ? err : new Error(detalle);
     }
   };
@@ -631,12 +658,13 @@ export default function App() {
 
   const handleApproveUser = async (id: number) => {
     try {
-      setUsuarios(prev => prev.map(u => u.id_usuario === id ? { ...u, activo: true } : u));
-      await fetch(`/api/v1/auth/usuarios/${id}/aprobar`, { method: 'PATCH' });
-      showToast('Usuario aprobado y activado en la plataforma.');
+      const res = await fetch(`/api/v1/auth/usuarios/${id}/aprobar`, { method: 'PATCH' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Error aprobando usuario.');
+      showToast(data.mensaje || 'Usuario aprobado y activado en la plataforma.');
       await loadData();
     } catch (err) {
-      showToast('Error aprobando usuario.', 'error');
+      showToast(err instanceof Error ? err.message : 'Error aprobando usuario.', 'error');
       await loadData();
     }
   };
