@@ -38,9 +38,9 @@ type ResultadoCargaLote = {
   archivados?: { ok: boolean }[];
 };
 
-function crearLotesArchivos(files: FileList): File[][] {
+function crearLotesArchivos(files: File[]): File[][] {
   const grupos = new Map<string, File[]>();
-  for (const file of Array.from(files)) {
+  for (const file of files) {
     const nombreBase = file.name.toLowerCase().replace(/\.[^.]+$/, '').replace(/[^a-z0-9]/g, '');
     const grupo = grupos.get(nombreBase) || [];
     grupo.push(file);
@@ -386,9 +386,10 @@ export default function App() {
 
   // Actions
   const handleUploadXml = async (files: FileList): Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number }> => {
+    const archivos = Array.from(files);
     let archivosConfirmados = 0;
     try {
-      const lotes = crearLotesArchivos(files);
+      const lotes = crearLotesArchivos(archivos);
       const total = {
         archivos_procesados: 0,
         xmls_extraidos: 0,
@@ -438,8 +439,8 @@ export default function App() {
         total.fallos_archivado += (data.archivados || []).filter((a: any) => !a.ok).length;
       }
 
-      if (total.archivos_procesados !== files.length) {
-        throw new Error(`Se procesaron ${total.archivos_procesados} de ${files.length} archivos.`);
+      if (total.archivos_procesados !== archivos.length) {
+        throw new Error(`Se procesaron ${total.archivos_procesados} de ${archivos.length} archivos.`);
       }
 
       if (total.facturas_creadas > 0) {
@@ -453,7 +454,7 @@ export default function App() {
       };
     } catch (err) {
       const detalle = err instanceof Error ? err.message : 'Error desconocido.';
-      showToast(`Error procesando archivos XML / ZIP (${archivosConfirmados} de ${files.length} confirmados): ${detalle}`, 'error');
+      showToast(`Error procesando archivos XML / ZIP (${archivosConfirmados} de ${archivos.length} confirmados): ${detalle}`, 'error');
       throw err instanceof Error ? err : new Error(detalle);
     }
   };
