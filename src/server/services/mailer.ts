@@ -19,11 +19,11 @@ const from = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@tlm.net
 export const mailer = {
   enabled: transporter !== null,
 
-  async send(to: string, subject: string, text: string) {
+  async send(to: string, subject: string, text: string, html?: string) {
     if (!transporter) {
       throw new Error('El servicio de correo no está configurado (define SMTP_HOST en .env).');
     }
-    await transporter.sendMail({ from, to, subject, text });
+    await transporter.sendMail({ from, to, subject, text, html });
   },
 
   // Comprueba la conexión y las credenciales con el servidor SMTP, sin enviar ningún correo.

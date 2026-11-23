@@ -79,6 +79,7 @@ const RUTAS_PUBLICAS = new Set([
   '/auth/register',
   '/auth/register/verify',
   '/auth/register/resend-verification',
+  '/auth/aprobar-por-correo',
   '/auth/recuperar-password/solicitar-codigo',
   '/auth/recuperar-password/verificar-y-cambiar'
 ]);

@@ -1,4 +1,4 @@
-import { eq, desc, inArray, and } from 'drizzle-orm';
+import { eq, desc, inArray, and, gt } from 'drizzle-orm';
 import { db as drizzleDb, pool, getActiveConnectionConfig } from '../../db/index.ts';
 import * as schema from '../../db/schema.ts';
 import fs from 'fs';
@@ -15,6 +15,24 @@ import type {
   PermisosUsuario 
 } from '../domain/types.ts';
 import { getDefaultPermissions } from '../storage/dataStore.ts';
+
+function mapUsuarioRow(r: any): Usuario {
+  return {
+    id_usuario: r.id,
+    nombre_completo: r.nombreCompleto,
+    email: r.email,
+    hashed_password: r.hashedPassword || undefined,
+    rol: r.rol as any,
+    activo: r.activo,
+    empresas_ids: r.empresasIds || [1],
+    permisos: (r.permisos as PermisosUsuario) || getDefaultPermissions(r.rol as any),
+    avatar_url: r.avatarUrl,
+    requiere_cambio_password: r.requiereCambioPassword || false,
+    email_verified: r.emailVerified !== false,
+    verification_token: r.verificationToken || null,
+    token_expires_at: r.tokenExpiresAt?.toISOString() || null
+  };
+}
 
 /** Convierte una fila de la tabla facturas al modelo de dominio (único punto de mapeo). */
 export function mapFacturaRow(r: any): Factura {
@@ -649,6 +667,78 @@ export class CloudSqlService {
     } catch (error) {
       console.error('[CloudSQL] Error getUsuarioByEmail:', error);
       return null;
+    }
+  }
+
+  public static async replacePendingVerificationToken(
+    id: number,
+    tokenHash: string,
+    expiresAt: string
+  ): Promise<Usuario | null> {
+    try {
+      const updated = await drizzleDb.update(schema.users)
+        .set({ verificationToken: tokenHash, tokenExpiresAt: new Date(expiresAt) })
+        .where(and(
+          eq(schema.users.id, id),
+          eq(schema.users.activo, false),
+          eq(schema.users.emailVerified, false)
+        ))
+        .returning();
+      return updated[0] ? mapUsuarioRow(updated[0]) : null;
+    } catch (error) {
+      console.error('[CloudSQL] Error reemplazando token de verificación:', error);
+      throw error;
+    }
+  }
+
+  public static async consumePendingVerificationToken(tokenHash: string, now = new Date()): Promise<Usuario | null> {
+    try {
+      const updated = await drizzleDb.update(schema.users)
+        .set({ emailVerified: true, verificationToken: null, tokenExpiresAt: null })
+        .where(and(
+          eq(schema.users.verificationToken, tokenHash),
+          eq(schema.users.activo, false),
+          eq(schema.users.emailVerified, false),
+          gt(schema.users.tokenExpiresAt, now)
+        ))
+        .returning();
+      return updated[0] ? mapUsuarioRow(updated[0]) : null;
+    } catch (error) {
+      console.error('[CloudSQL] Error consumiendo token de verificación:', error);
+      throw error;
+    }
+  }
+
+  public static async approvePendingRegistration(id: number): Promise<Usuario | null> {
+    try {
+      const updated = await drizzleDb.update(schema.users)
+        .set({ activo: true, requiereCambioPassword: true })
+        .where(and(
+          eq(schema.users.id, id),
+          eq(schema.users.activo, false),
+          eq(schema.users.emailVerified, true)
+        ))
+        .returning();
+      return updated[0] ? mapUsuarioRow(updated[0]) : null;
+    } catch (error) {
+      console.error('[CloudSQL] Error aprobando solicitud de registro:', error);
+      throw error;
+    }
+  }
+
+  public static async rejectPendingRegistration(id: number): Promise<Usuario | null> {
+    try {
+      const deleted = await drizzleDb.delete(schema.users)
+        .where(and(
+          eq(schema.users.id, id),
+          eq(schema.users.activo, false),
+          eq(schema.users.emailVerified, true)
+        ))
+        .returning();
+      return deleted[0] ? mapUsuarioRow(deleted[0]) : null;
+    } catch (error) {
+      console.error('[CloudSQL] Error rechazando solicitud de registro:', error);
+      throw error;
     }
   }
 

@@ -24,8 +24,10 @@ import { hashPassword, isHashed, verifyPassword, matchesLegacyPassword } from '.
 import { startSession, endSession, getSessionUser } from '../services/sessionAuth.ts';
 import { mailer } from '../services/mailer.ts';
 import { secondsLocked, recordFailure, lockFor, clearAttempts } from '../services/attemptLimiter.ts';
+import { crearTokenAprobacion, huellaCorreo, verificarTokenAprobacion, type AccionAprobacion } from '../services/aprobacionToken.ts';
 
 const router = Router();
+router.use(express.urlencoded({ extended: false, limit: '10kb' }));
 
 // Número dentro de un rango; null si no es un número válido
 function numeroEnRango(valor: unknown, min: number, max: number): number | null {
@@ -85,66 +87,140 @@ const LOGIN_MAX_POR_IP = 30;
 const LOGIN_VENTANA_MS = 15 * 60 * 1000;
 const LOGIN_BLOQUEO_MS = 15 * 60 * 1000;
 const CODIGO_ESPERA_MS = 60 * 1000; // tiempo mínimo entre dos códigos del mismo correo
+const registrosEnProceso = new Set<string>();
 
 /** Busca la cuenta por correo: primero en Cloud SQL y luego en el almacenamiento local. */
 async function buscarUsuarioPorCorreo(correo: string): Promise<any | null> {
-  const local = db.usuarios.find(u => u.email.toLowerCase() === correo);
-  if (local) return local;
-  return (await CloudSqlService.getUsuarioByEmail(correo).catch(() => null)) || null;
+  if (await CloudSqlService.isCloudSqlOnline()) {
+    return CloudSqlService.getUsuarioByEmail(correo);
+  }
+  return db.usuarios.find(u => u.email.trim().toLowerCase() === correo) || null;
 }
 
-async function buscarUsuarioPorToken(tokenHash: string): Promise<any | null> {
-  const local = db.usuarios.find(u => u.verification_token === tokenHash);
-  if (local) return local;
-  const usuarios = await CloudSqlService.getUsuarios();
-  return usuarios.find(u => u.verification_token === tokenHash) || null;
-}
-
-function baseUrlAplicacion(req: Request): string {
+function baseUrlAplicacion(): string {
   const configuredUrl = process.env.APP_URL || process.env.RENDER_EXTERNAL_URL;
-  const appUrl = new URL(configuredUrl || `${req.protocol}://${req.get('host')}`);
-  if (appUrl.protocol !== 'https:' && appUrl.protocol !== 'http:') {
-    throw new Error('APP_URL debe usar HTTP o HTTPS.');
+  if (!configuredUrl) throw new Error('Configura APP_URL o RENDER_EXTERNAL_URL para enviar enlaces de registro.');
+  const appUrl = new URL(configuredUrl);
+  if ((appUrl.protocol !== 'https:' && appUrl.protocol !== 'http:') || appUrl.username || appUrl.password) {
+    throw new Error('APP_URL debe ser una URL HTTP(S) válida.');
+  }
+  if (process.env.NODE_ENV === 'production' && appUrl.protocol !== 'https:') {
+    throw new Error('APP_URL debe usar HTTPS en producción.');
   }
   return appUrl.origin;
 }
 
-async function enviarCorreosRegistro(req: Request, user: Usuario, token: string): Promise<void> {
-  if (!mailer.enabled) throw new Error('El servicio de correo no está configurado.');
-  const baseUrl = baseUrlAplicacion(req);
-  const verificationUrl = `${baseUrl}/api/v1/auth/register/verify?token=${encodeURIComponent(token)}`;
-  const urlConsola = `${baseUrl}/`;
-  const avisos = [
-    mailer.send(
-      user.email,
-      'Confirma tu correo para solicitar acceso a Consola TLM',
-      `Hola ${user.nombre_completo},\n\nPara confirmar que tienes acceso a este buzón, abre este enlace dentro de las próximas 24 horas:\n${verificationUrl}\n\nDespués de verificarlo, el equipo de TLM revisará tu solicitud y la relación de tu cuenta con TLM o una entidad conocida. Si se aprueba el acceso, al iniciar sesión deberás elegir una contraseña personal nueva.`
-    ),
-    ...['juan.yaya@tlm.net.co', 'automatizaciones@tlm.net.co'].map(destinatario =>
-      mailer.send(
-        destinatario,
-        'Solicitud de autorización de cuenta - Consola TLM',
-        `Se recibió una solicitud de acceso:\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\nCorreo verificado: Pendiente\n\nConfirme que conoce a la persona y su relación con TLM o con una entidad conocida. El usuario debe verificar primero que tiene acceso al buzón; después puede revisar y aprobar la solicitud en la sección Accesos de Consola TLM:\n${urlConsola}\n\nNo se incluye ni se envía la contraseña del usuario.`
-      )
-    )
-  ];
-  await Promise.all(avisos);
+const escaparHtml = (valor: unknown) =>
+  String(valor ?? '').replace(/[&<>"']/g, caracter => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[caracter]!));
+
+function aprobadoresRegistro(): string[] {
+  const configurados = process.env.APROBADOR_REGISTRO_EMAIL || process.env.ADMIN_EMAIL || 'juan.yaya@tlm.net.co,automatizaciones@tlm.net.co';
+  return [...new Set(configurados.split(',').map(correo => correo.trim().toLowerCase()).filter(correoValido))];
 }
 
-async function guardarCambiosUsuario(user: Usuario, cambios: Partial<Usuario>): Promise<Usuario> {
-  const usuarioLocal = db.usuarios.includes(user);
-  let actualizado: Usuario | null = null;
-  try {
-    actualizado = await CloudSqlService.updateUsuario(user.id_usuario, cambios);
-    if (!actualizado && !usuarioLocal) throw new Error('No se encontró el usuario en Cloud SQL.');
-  } catch (error) {
-    if (!usuarioLocal) throw error;
-    console.warn('[CloudSQL] Se guardará localmente la actualización del usuario:', error);
-  }
-  Object.assign(user, cambios);
-  if (!db.usuarios.includes(user)) db.usuarios.push(user);
+async function enviarCorreoVerificacion(user: Usuario, token: string, baseUrl: string): Promise<void> {
+  if (!mailer.enabled) throw new Error('El servicio de correo no está configurado.');
+  const verificationUrl = `${baseUrl}/api/v1/auth/register/verify?token=${encodeURIComponent(token)}`;
+  await mailer.send(
+    user.email,
+    'Confirma tu correo para solicitar acceso a Consola TLM',
+    `Hola ${user.nombre_completo},\n\nPara confirmar que tienes acceso a este buzón, abre este enlace dentro de las próximas 24 horas:\n${verificationUrl}\n\nDespués de verificarlo, el equipo de TLM revisará tu solicitud. Si se aprueba el acceso, al iniciar sesión deberás cambiar tu contraseña.`,
+    `<p>Hola ${escaparHtml(user.nombre_completo)},</p><p>Confirma que tienes acceso a este buzón abriendo este enlace dentro de las próximas 24 horas:</p><p><a href="${escaparHtml(verificationUrl)}">Confirmar correo</a></p><p>Después de verificarlo, el equipo de TLM revisará tu solicitud.</p>`
+  );
+}
+
+async function enviarSolicitudAprobacion(user: Usuario, baseUrl: string): Promise<void> {
+  const destinatarios = aprobadoresRegistro();
+  if (!mailer.enabled) throw new Error('El servicio de correo no está configurado.');
+  if (!destinatarios.length) throw new Error('No hay correos válidos configurados para aprobar registros.');
+
+  const enlaces = (accion: AccionAprobacion) =>
+    `${baseUrl}/api/v1/auth/aprobar-por-correo?t=${encodeURIComponent(crearTokenAprobacion(user.id_usuario, user.email, accion))}`;
+  const aprobarUrl = enlaces('aprobar');
+  const rechazarUrl = enlaces('rechazar');
+  const texto = `Se verificó el correo y hay una solicitud de acceso pendiente:\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\n\nAprobar: ${aprobarUrl}\nRechazar: ${rechazarUrl}\n\nAbrir un enlace solo muestra la solicitud; la acción se ejecuta al confirmar en la página. Los enlaces vencen en 72 horas.`;
+  const html = `<p>Se verificó el correo y hay una solicitud de acceso pendiente:</p><p><b>${escaparHtml(user.nombre_completo)}</b><br>${escaparHtml(user.email)}</p><p><a href="${escaparHtml(aprobarUrl)}" style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;padding:10px 18px;border-radius:8px;font-weight:bold">Revisar y aprobar</a> <a href="${escaparHtml(rechazarUrl)}" style="display:inline-block;background:#dc2626;color:#fff;text-decoration:none;padding:10px 18px;border-radius:8px;font-weight:bold">Rechazar</a></p><p>Abrir un enlace solo muestra la solicitud; la acción se ejecuta al confirmar en la página. Los enlaces vencen en 72 horas.</p>`;
+  await Promise.all(destinatarios.map(destinatario => mailer.send(
+    destinatario,
+    `Solicitud de acceso: ${user.nombre_completo}`,
+    texto,
+    html
+  )));
+}
+
+async function enviarCorreosRegistro(user: Usuario, token: string, baseUrl: string): Promise<void> {
+  const avisosAdmin = aprobadoresRegistro().map(destinatario =>
+    mailer.send(
+      destinatario,
+      `Solicitud de acceso: ${user.nombre_completo} (pendiente de verificación)`,
+      `Se recibió una solicitud de acceso:\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\nCorreo verificado: Pendiente\n\nAl confirmar el correo del solicitante, recibirá enlaces firmados para aprobar o rechazar la solicitud.\n\nNo se incluye ni se envía la contraseña del usuario.`
+    )
+  );
+  await Promise.all([enviarCorreoVerificacion(user, token, baseUrl), ...avisosAdmin]);
+}
+
+function guardarUsuarioLocal(usuario: Usuario): void {
+  const index = db.usuarios.findIndex(u => u.id_usuario === usuario.id_usuario);
+  if (index === -1) db.usuarios.push(usuario);
+  else db.usuarios[index] = usuario;
   db.saveToDisk();
-  return actualizado ? Object.assign(user, actualizado, cambios) : user;
+}
+
+async function consumirTokenVerificacion(tokenHash: string): Promise<Usuario | null> {
+  if (await CloudSqlService.isCloudSqlOnline()) {
+    const usuario = await CloudSqlService.consumePendingVerificationToken(tokenHash);
+    if (usuario) guardarUsuarioLocal(usuario);
+    return usuario;
+  }
+
+  const usuario = db.usuarios.find(u =>
+    u.verification_token === tokenHash &&
+    u.activo === false &&
+    u.email_verified === false &&
+    Boolean(u.token_expires_at) &&
+    new Date(u.token_expires_at!).getTime() > Date.now()
+  );
+  if (!usuario) return null;
+  Object.assign(usuario, { email_verified: true, verification_token: null, token_expires_at: null });
+  db.saveToDisk();
+  return usuario;
+}
+
+async function usuarioPorIdRegistro(id: number): Promise<Usuario | null> {
+  if (await CloudSqlService.isCloudSqlOnline()) return CloudSqlService.getUsuarioById(id);
+  return db.usuarios.find(u => u.id_usuario === id) || null;
+}
+
+async function aprobarRegistro(id: number): Promise<Usuario | null> {
+  if (await CloudSqlService.isCloudSqlOnline()) {
+    const usuario = await CloudSqlService.approvePendingRegistration(id);
+    if (usuario) guardarUsuarioLocal(usuario);
+    return usuario;
+  }
+  const usuario = db.usuarios.find(u => u.id_usuario === id && !u.activo && u.email_verified === true);
+  if (!usuario) return null;
+  usuario.activo = true;
+  usuario.requiere_cambio_password = true;
+  db.saveToDisk();
+  return usuario;
+}
+
+async function rechazarRegistro(id: number): Promise<Usuario | null> {
+  if (await CloudSqlService.isCloudSqlOnline()) {
+    const usuario = await CloudSqlService.rejectPendingRegistration(id);
+    if (usuario) {
+      db.usuarios = db.usuarios.filter(u => u.id_usuario !== id);
+      db.saveToDisk();
+    }
+    return usuario;
+  }
+  const usuario = db.usuarios.find(u => u.id_usuario === id && !u.activo && u.email_verified === true);
+  if (!usuario) return null;
+  db.usuarios = db.usuarios.filter(u => u.id_usuario !== id);
+  db.saveToDisk();
+  return usuario;
 }
 
 /** Guarda la contraseña (siempre cifrada) en Cloud SQL y en el almacenamiento local. */
@@ -478,47 +554,81 @@ router.post('/auth/register', async (req: Request, res: Response) => {
   }
   const correo = email.toLowerCase().trim();
   if (!correoValido(correo)) return res.status(400).json({ detail: 'Ingresa una dirección de correo válida.' });
-  if (await buscarUsuarioPorCorreo(correo)) return res.status(400).json({ detail: 'El correo electrónico ya se encuentra registrado.' });
   const checkRule = validatePasswordRule(password);
   if (!checkRule.ok) return res.status(400).json({ detail: checkRule.message });
-  const claveRegistroIp = `registro:ip:${req.ip}`;
-  const segundosRegistro = secondsLocked(claveRegistroIp);
-  if (segundosRegistro > 0) {
-    res.set('Retry-After', String(segundosRegistro));
-    return res.status(429).json({ detail: `Espera ${segundosRegistro} segundos antes de enviar otra solicitud.` });
+  if (!mailer.enabled) return res.status(503).json({ detail: 'El registro requiere correo. Configura SMTP_HOST en el servidor.' });
+  if (!aprobadoresRegistro().length) {
+    return res.status(503).json({ detail: 'No hay correos válidos configurados para aprobar registros.' });
   }
-  lockFor(claveRegistroIp, CODIGO_ESPERA_MS);
-
-  const idNuevo = Math.max(...db.usuarios.map(u => u.id_usuario), 0) + 1;
-  const token = crypto.randomBytes(32).toString('hex');
-  const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-  const nuevo: any = {
-    id_usuario: idNuevo, nombre_completo: String(nombre_completo).trim(), email: correo,
-    hashed_password: hashPassword(password), rol: 'Analista', activo: false,
-    requiere_cambio_password: true, email_verified: false,
-    verification_token: hashCodigo(token), token_expires_at: tokenExpiresAt,
-    empresas_ids: [1], permisos: getDefaultPermissions('Analista')
-  };
-  const creado = await CloudSqlService.createUsuario(nuevo).catch(err => {
-    console.warn('[CloudSQL] Fallback de registro a DataStore local:', err);
-    return null;
-  });
-  if (creado) nuevo.id_usuario = creado.id_usuario;
-  db.usuarios.push(nuevo);
-  db.saveToDisk();
+  let baseUrl: string;
   try {
-    await enviarCorreosRegistro(req, nuevo, token);
-  } catch (error: any) {
-    console.error('[Registro] No se pudieron enviar todos los correos de verificación/aprobación:', error);
-    return res.status(503).json({
-      detail: 'La solicitud quedó guardada, pero no se pudieron enviar todos los correos. Usa “Reenviar verificación” para intentarlo de nuevo.',
-      registro_creado: true
-    });
+    baseUrl = baseUrlAplicacion();
+  } catch (error) {
+    console.error('[Registro] URL pública no configurada:', error);
+    return res.status(503).json({ detail: 'El servidor no tiene una URL pública válida configurada para completar el registro.' });
   }
-  res.status(201).json({
-    mensaje: 'Solicitud guardada. Revisa tu correo y confirma el enlace; después, Juan Yaya o automatizaciones@tlm.net.co revisarán y aprobarán el acceso.',
-    id_usuario: nuevo.id_usuario
-  });
+
+  if (registrosEnProceso.has(correo)) {
+    return res.status(409).json({ detail: 'Ya hay una solicitud en curso para ese correo. Intenta de nuevo más tarde.' });
+  }
+  registrosEnProceso.add(correo);
+  try {
+    const cloudOnline = await CloudSqlService.isCloudSqlOnline();
+    const existente = cloudOnline
+      ? await CloudSqlService.getUsuarioByEmail(correo)
+      : db.usuarios.find(u => u.email.trim().toLowerCase() === correo) || null;
+    if (existente) return res.status(400).json({ detail: 'El correo electrónico ya se encuentra registrado.' });
+
+    const claveRegistroIp = `registro:ip:${req.ip}`;
+    const segundosRegistro = secondsLocked(claveRegistroIp);
+    if (segundosRegistro > 0) {
+      res.set('Retry-After', String(segundosRegistro));
+      return res.status(429).json({ detail: `Espera ${segundosRegistro} segundos antes de enviar otra solicitud.` });
+    }
+    lockFor(claveRegistroIp, CODIGO_ESPERA_MS);
+
+    const idNuevo = Math.max(...db.usuarios.map(u => u.id_usuario), 0) + 1;
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const nuevo: any = {
+      id_usuario: idNuevo, nombre_completo: String(nombre_completo).trim(), email: correo,
+      hashed_password: hashPassword(password), rol: 'Analista', activo: false,
+      requiere_cambio_password: true, email_verified: false,
+      verification_token: hashCodigo(token), token_expires_at: tokenExpiresAt,
+      empresas_ids: [1], permisos: getDefaultPermissions('Analista')
+    };
+    if (cloudOnline) {
+      try {
+        Object.assign(nuevo, await CloudSqlService.createUsuario(nuevo));
+      } catch (error: any) {
+        console.error('[Registro] No se pudo crear la cuenta en Cloud SQL:', error);
+        if (error?.code === '23505') {
+          return res.status(400).json({ detail: 'El correo electrónico ya se encuentra registrado.' });
+        }
+        return res.status(503).json({ detail: 'No se pudo guardar la solicitud. Intenta de nuevo más tarde.' });
+      }
+    }
+
+    guardarUsuarioLocal(nuevo);
+    try {
+      await enviarCorreosRegistro(nuevo, token, baseUrl);
+    } catch (error: any) {
+      console.error('[Registro] No se pudieron enviar todos los correos de verificación/aprobación:', error);
+      return res.status(503).json({
+        detail: 'La solicitud quedó guardada, pero no se pudieron enviar todos los correos. Usa “Reenviar verificación” para intentarlo de nuevo.',
+        registro_creado: true
+      });
+    }
+    return res.status(201).json({
+      mensaje: 'Solicitud guardada. Revisa tu correo y confirma el enlace; después, el administrador recibirá los botones para aprobar o rechazar.',
+      id_usuario: nuevo.id_usuario
+    });
+  } catch (error) {
+    console.error('[Registro] Error inesperado al guardar la solicitud:', error);
+    return res.status(503).json({ detail: 'No se pudo guardar la solicitud. Intenta de nuevo más tarde.' });
+  } finally {
+    registrosEnProceso.delete(correo);
+  }
 });
 
 router.get('/auth/register/verify', async (req: Request, res: Response) => {
@@ -527,31 +637,42 @@ router.get('/auth/register/verify', async (req: Request, res: Response) => {
     return res.status(400).type('html').send('<h1>Enlace no válido</h1><p>Solicita un nuevo correo de verificación desde Consola TLM.</p>');
   }
 
-  const user = await buscarUsuarioPorToken(hashCodigo(token));
+  res.type('html').send(paginaAprobacion(
+    'Confirmar correo',
+    `<p>Confirma que tienes acceso al correo asociado a esta solicitud.</p><form method="post" action="/api/v1/auth/register/verify"><input type="hidden" name="token" value="${escaparHtml(token)}"><button type="submit" style="background:#271a82;color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:bold;cursor:pointer">Confirmar correo</button></form>`
+  ));
+});
+
+router.post('/auth/register/verify', async (req: Request, res: Response) => {
+  const token = typeof req.body?.token === 'string' ? req.body.token : '';
+  if (!/^[a-f0-9]{64}$/i.test(token)) {
+    return res.status(400).type('html').send('<h1>Enlace no válido</h1><p>Solicita un nuevo correo de verificación desde Consola TLM.</p>');
+  }
+
+  let user: Usuario | null;
+  try {
+    user = await consumirTokenVerificacion(hashCodigo(token));
+  } catch (error) {
+    console.error('[Registro] No se pudo confirmar el correo:', error);
+    return res.status(503).type('html').send('<h1>No se pudo confirmar</h1><p>Intenta de nuevo más tarde.</p>');
+  }
   if (!user) {
     return res.status(400).type('html').send('<h1>Enlace no válido o ya utilizado</h1><p>Solicita un nuevo correo de verificación desde Consola TLM.</p>');
   }
-  if (!user.token_expires_at || new Date(user.token_expires_at).getTime() <= Date.now()) {
-    await guardarCambiosUsuario(user, { verification_token: null, token_expires_at: null });
-    return res.status(410).type('html').send('<h1>El enlace venció</h1><p>Vuelve a Consola TLM y solicita reenviar la verificación.</p>');
-  }
 
-  await guardarCambiosUsuario(user, { email_verified: true, verification_token: null, token_expires_at: null });
-  const baseUrl = baseUrlAplicacion(req);
-  const mensaje = `<h1>Correo verificado</h1><p>Tu buzón quedó confirmado. La solicitud aún requiere la aprobación de un administrador de TLM.</p><p><a href="${baseUrl}/">Ir a Consola TLM</a></p>`;
+  let baseUrl = '/';
+  try {
+    baseUrl = baseUrlAplicacion();
+  } catch (error) {
+    console.error('[Registro] No se pudo construir la URL pública:', error);
+  }
+  const mensaje = `<h1>Correo verificado</h1><p>Tu buzón quedó confirmado. La solicitud aún requiere la aprobación de un administrador de TLM.</p><p><a href="${escaparHtml(baseUrl)}">Ir a Consola TLM</a></p>`;
+  try {
+    await enviarSolicitudAprobacion(user, baseUrl === '/' ? baseUrlAplicacion() : baseUrl);
+  } catch (error) {
+    console.error('[Registro] No se pudo enviar al aprobador los enlaces de aprobación:', error);
+  }
   res.status(200).type('html').send(mensaje);
-
-  for (const destinatario of ['juan.yaya@tlm.net.co', 'automatizaciones@tlm.net.co']) {
-    try {
-      await mailer.send(
-        destinatario,
-        'Correo confirmado - solicitud de acceso a Consola TLM',
-        `El usuario confirmó que tiene acceso al buzón.\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\n\nRevise si conoce a esta persona y su relación con TLM o una entidad conocida. Si autoriza el acceso, apruébelo en la sección Accesos:\n${baseUrl}/`
-      );
-    } catch (error) {
-      console.error(`[Registro] No se pudo notificar la verificación a ${destinatario}:`, error);
-    }
-  }
 });
 
 router.post('/auth/register/resend-verification', async (req: Request, res: Response) => {
@@ -565,25 +686,140 @@ router.post('/auth/register/resend-verification', async (req: Request, res: Resp
     res.set('Retry-After', String(segundosReenvio));
     return res.status(429).json({ detail: `Espera ${segundosReenvio} segundos antes de solicitar otro correo.` });
   }
-  const user = await buscarUsuarioPorCorreo(correo);
+  lockFor(claveReenvio, CODIGO_ESPERA_MS);
+  const cloudOnline = await CloudSqlService.isCloudSqlOnline();
+  let user = cloudOnline
+    ? await CloudSqlService.getUsuarioByEmail(correo)
+    : db.usuarios.find(u => u.email.trim().toLowerCase() === correo) || null;
   if (!user || user.activo || user.email_verified !== false) {
     return res.json({ mensaje: 'Si hay una solicitud pendiente para ese correo, recibirás instrucciones para continuar.' });
   }
-  lockFor(claveReenvio, CODIGO_ESPERA_MS);
-
+  let baseUrl: string;
+  try {
+    baseUrl = baseUrlAplicacion();
+  } catch (error) {
+    console.error('[Registro] URL pública no configurada para reenviar verificación:', error);
+    return res.status(503).json({ detail: 'El servidor no tiene una URL pública válida configurada para completar el registro.' });
+  }
   const token = crypto.randomBytes(32).toString('hex');
   const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-  await guardarCambiosUsuario(user, {
-    verification_token: hashCodigo(token),
-    token_expires_at: tokenExpiresAt
-  });
   try {
-    await enviarCorreosRegistro(req, user, token);
+    if (cloudOnline) {
+      const actualizado = await CloudSqlService.replacePendingVerificationToken(
+        user.id_usuario,
+        hashCodigo(token),
+        tokenExpiresAt
+      );
+      if (!actualizado) {
+        return res.json({ mensaje: 'Si hay una solicitud pendiente para ese correo, recibirás instrucciones para continuar.' });
+      }
+      user = actualizado;
+      guardarUsuarioLocal(user);
+    } else {
+      const local = db.usuarios.find(u =>
+        u.id_usuario === user!.id_usuario &&
+        !u.activo &&
+        u.email_verified === false
+      );
+      if (!local) {
+        return res.json({ mensaje: 'Si hay una solicitud pendiente para ese correo, recibirás instrucciones para continuar.' });
+      }
+      Object.assign(local, { verification_token: hashCodigo(token), token_expires_at: tokenExpiresAt });
+      db.saveToDisk();
+    }
+    await enviarCorreoVerificacion(user, token, baseUrl);
   } catch (error) {
     console.error('[Registro] No se pudo reenviar la verificación:', error);
     return res.status(503).json({ detail: 'No se pudieron enviar los correos. Vuelve a intentarlo más tarde.' });
   }
   res.json({ mensaje: 'Se reenviaron las instrucciones de verificación al correo indicado.' });
+});
+
+function paginaAprobacion(titulo: string, contenido: string): string {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${escaparHtml(titulo)}</title></head><body style="font-family:Arial,sans-serif;background:#f4f5fb;padding:32px;color:#1f2937"><main style="max-width:460px;margin:auto;background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:24px"><h1 style="font-size:20px">${escaparHtml(titulo)}</h1>${contenido}</main></body></html>`;
+}
+
+router.get('/auth/aprobar-por-correo', async (req: Request, res: Response) => {
+  const token = typeof req.query.t === 'string' ? req.query.t : '';
+  const solicitud = verificarTokenAprobacion(token);
+  if (!solicitud) {
+    return res.status(400).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>El enlace no es válido o ya venció. Pide al administrador revisar la solicitud desde Consola TLM.</p>'));
+  }
+
+  let user: Usuario | null;
+  try {
+    user = await usuarioPorIdRegistro(solicitud.idUsuario);
+  } catch (error) {
+    console.error('[Registro] No se pudo consultar la solicitud de aprobación:', error);
+    return res.status(503).type('html').send(paginaAprobacion('No se pudo consultar', '<p>Intenta de nuevo más tarde.</p>'));
+  }
+  if (!user || huellaCorreo(user.email) !== solicitud.huella || user.activo || user.email_verified !== true) {
+    return res.status(409).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>La solicitud ya fue procesada, no está verificada o la persona ya no está registrada.</p>'));
+  }
+
+  const aprobar = solicitud.accion === 'aprobar';
+  const textoAccion = aprobar ? 'aprobar el acceso' : 'rechazar la solicitud';
+  const etiqueta = aprobar ? 'Confirmar aprobación' : 'Confirmar rechazo';
+  const color = aprobar ? '#16a34a' : '#dc2626';
+  res.type('html').send(paginaAprobacion(
+    aprobar ? 'Aprobar acceso' : 'Rechazar solicitud',
+    `<p><b>${escaparHtml(user.nombre_completo)}</b><br>${escaparHtml(user.email)}</p><p>Al confirmar, vas a ${textoAccion}.</p><form method="post" action="/api/v1/auth/aprobar-por-correo"><input type="hidden" name="t" value="${escaparHtml(token)}"><button type="submit" style="background:${color};color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:bold;cursor:pointer">${etiqueta}</button></form>`
+  ));
+});
+
+router.post('/auth/aprobar-por-correo', async (req: Request, res: Response) => {
+  const token = typeof req.body?.t === 'string' ? req.body.t : '';
+  const solicitud = verificarTokenAprobacion(token);
+  if (!solicitud) {
+    return res.status(400).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>El enlace no es válido o ya venció.</p>'));
+  }
+
+  let user: Usuario | null;
+  try {
+    user = await usuarioPorIdRegistro(solicitud.idUsuario);
+  } catch (error) {
+    console.error('[Registro] No se pudo consultar la solicitud de aprobación:', error);
+    return res.status(503).type('html').send(paginaAprobacion('No se pudo completar', '<p>Intenta de nuevo más tarde.</p>'));
+  }
+  if (!user || huellaCorreo(user.email) !== solicitud.huella || user.email_verified !== true) {
+    return res.status(409).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>La solicitud ya fue procesada o ya no está disponible.</p>'));
+  }
+
+  try {
+    const updated = solicitud.accion === 'aprobar'
+      ? await aprobarRegistro(user.id_usuario)
+      : await rechazarRegistro(user.id_usuario);
+    if (!updated) {
+      return res.status(409).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>La solicitud ya fue procesada o ya no está disponible.</p>'));
+    }
+
+    if (solicitud.accion === 'aprobar') {
+      try {
+        await mailer.send(
+          updated.email,
+          'Tu acceso a Consola TLM fue aprobado',
+          `Hola ${updated.nombre_completo}, un administrador aprobó tu acceso a la Consola TLM. Ya puedes iniciar sesión con el correo ${updated.email} y la contraseña que registraste. Por seguridad, tendrás que cambiarla antes de continuar.`
+        );
+      } catch (error) {
+        console.error('[Registro] No se pudo enviar el aviso de aprobación:', error);
+      }
+      return res.type('html').send(paginaAprobacion('Acceso aprobado', `<p><b>${escaparHtml(updated.nombre_completo)}</b> ya puede iniciar sesión.</p>`));
+    }
+
+    try {
+      await mailer.send(
+        updated.email,
+        'Tu solicitud de acceso a la Consola TLM no fue aprobada',
+        `Hola ${updated.nombre_completo}, tu solicitud de acceso a la Consola TLM no fue aprobada. Si crees que es un error, comunícate con el administrador.`
+      );
+    } catch (error) {
+      console.error('[Registro] No se pudo enviar el aviso de rechazo:', error);
+    }
+    return res.type('html').send(paginaAprobacion('Solicitud rechazada', `<p>Se rechazó la solicitud de <b>${escaparHtml(updated.email)}</b>.</p>`));
+  } catch (error) {
+    console.error('[Registro] No se pudo procesar la aprobación por correo:', error);
+    return res.status(503).type('html').send(paginaAprobacion('No se pudo completar', '<p>Intenta de nuevo más tarde.</p>'));
+  }
 });
 
 router.get('/auth/usuarios', async (_req: Request, res: Response) => {
@@ -600,31 +836,26 @@ router.get('/auth/usuarios', async (_req: Request, res: Response) => {
 
 router.patch('/auth/usuarios/:id/aprobar', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
-  let user = db.usuarios.find(u => u.id_usuario === id);
-  if (!user) {
-    try {
-      user = await CloudSqlService.getUsuarioById(id) || undefined;
-    } catch (error) {
-      console.error('[CloudSQL] No se pudo consultar el usuario para aprobación:', error);
-      return res.status(503).json({ detail: 'No se pudo consultar el usuario. Intenta de nuevo más tarde.' });
-    }
-  }
-  if (!user) return res.status(404).json({ detail: 'No se encontró el usuario solicitado.' });
-  if (user.email_verified === false) {
-    return res.status(409).json({ detail: 'El usuario debe confirmar su correo antes de aprobar el acceso.' });
-  }
-  if (user.activo) {
-    return res.json({ mensaje: 'El usuario ya está aprobado.', usuario: usuarioPublico(user), correo_enviado: false });
-  }
-
   try {
-    await guardarCambiosUsuario(user, { activo: true, requiere_cambio_password: true });
+    const user = await usuarioPorIdRegistro(id);
+    if (!user) return res.status(404).json({ detail: 'No se encontró el usuario solicitado.' });
+    if (user.email_verified !== true) {
+      return res.status(409).json({ detail: 'El usuario debe confirmar su correo antes de aprobar el acceso.' });
+    }
+    if (user.activo) {
+      return res.json({ mensaje: 'El usuario ya está aprobado.', usuario: usuarioPublico(user), correo_enviado: false });
+    }
+
+    const actualizado = await aprobarRegistro(id);
+    if (!actualizado) {
+      return res.status(409).json({ detail: 'La solicitud ya fue procesada. Actualiza la lista de usuarios.' });
+    }
     let correoEnviado = true;
     try {
       await mailer.send(
-        user.email,
+        actualizado.email,
         'Tu acceso a Consola TLM fue aprobado',
-        `Hola ${user.nombre_completo},\n\nUn administrador aprobó tu solicitud de acceso a Consola TLM. Inicia sesión con el correo ${user.email} y la contraseña que elegiste al registrarte. Por seguridad, tendrás que cambiarla por una nueva contraseña personal antes de continuar.`
+        `Hola ${actualizado.nombre_completo},\n\nUn administrador aprobó tu solicitud de acceso a Consola TLM. Inicia sesión con el correo ${actualizado.email} y la contraseña que elegiste al registrarte. Por seguridad, tendrás que cambiarla por una nueva contraseña personal antes de continuar.`
       );
     } catch (error) {
       correoEnviado = false;
@@ -634,11 +865,12 @@ router.patch('/auth/usuarios/:id/aprobar', async (req: Request, res: Response) =
       mensaje: correoEnviado
         ? 'Usuario aprobado y aviso enviado por correo.'
         : 'Usuario aprobado, pero no se pudo enviar el aviso por correo.',
-      usuario: usuarioPublico(user),
+      usuario: usuarioPublico(actualizado),
       correo_enviado: correoEnviado
     });
   } catch (err: any) {
-    res.status(500).json({ detail: err.message || 'No se pudo aprobar el usuario.' });
+    console.error('[Registro] No se pudo aprobar el usuario:', err);
+    res.status(503).json({ detail: 'No se pudo aprobar el usuario. Intenta de nuevo más tarde.' });
   }
 });
 
