@@ -118,15 +118,20 @@ export default function App() {
     } catch (e) {}
     return null;
   });
+  const sessionVersion = useRef(0);
 
   // Cierra la sesión en el servidor (borra la cookie) y luego en la interfaz
   const cerrarSesion = async () => {
-    await fetch('/api/v1/auth/logout', { method: 'POST' }).catch(() => undefined);
     handleSelectUser(null);
     setIsAuthModalOpen(true);
+    await fetch('/api/v1/auth/logout', { method: 'POST' }).catch(() => undefined);
   };
 
   const handleSelectUser = (u: Usuario | null) => {
+    if (currentUser?.id_usuario !== u?.id_usuario) {
+      sessionVersion.current++;
+      setFacturas([]);
+    }
     setCurrentUser(u);
     setIsAuthModalOpen(false);
     if (u) {
@@ -227,6 +232,8 @@ export default function App() {
   };
 
   const loadData = async () => {
+    if (!currentUser) return;
+    const version = sessionVersion.current;
     setIsRefreshing(true);
     try {
       // 1. Fetch Empresas
@@ -255,6 +262,7 @@ export default function App() {
       const empId = empresaVigente.id_empresa;
       const resFacturas = await fetch(`/api/v1/facturas?id_empresa=${empId}`);
       const dataFacturas = await resFacturas.json();
+      if (version !== sessionVersion.current) return;
       const uniqueFacturas = (Array.isArray(dataFacturas) ? dataFacturas : []).filter(
         (f: Factura, index: number, self: Factura[]) => index === self.findIndex((t) => t.id_factura === f.id_factura)
       );
@@ -396,6 +404,7 @@ export default function App() {
     onProgress?: (progress: ProgresoCargaArchivos) => void
   ): Promise<{ archivos_procesados: number; archivos_totales: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number; errores_lectura: { nombre: string; error: string }[] }> => {
     const archivos = Array.from(files);
+    const version = sessionVersion.current;
     const archivosConfirmados = new Set<File>();
     const erroresPorArchivo = new Map<File, { nombre: string; error: string }[]>();
     let archivosRevisados = 0;
@@ -415,6 +424,7 @@ export default function App() {
       };
 
       const enviarLote = async (lote: File[], reintentarLectura = true, intento = 0): Promise<void> => {
+        if (version !== sessionVersion.current) return;
         const formData = new FormData();
         formData.append('id_empresa', (activeEmpresa?.id_empresa || 1).toString());
         lote.forEach(file => formData.append('archivos', file));
@@ -425,6 +435,7 @@ export default function App() {
             headers: { 'x-tlm-user-id': String(currentUser?.id_usuario || '') },
             body: formData
           });
+          if (version !== sessionVersion.current) return;
           const responseText = await res.text();
           let data: ResultadoCargaLote;
           try {
@@ -455,6 +466,7 @@ export default function App() {
 
           lote.forEach(file => archivosConfirmados.add(file));
           setFacturas(prev => {
+            if (version !== sessionVersion.current) return prev;
             const porId = new Map(prev.map(factura => [factura.id_factura, factura]));
             facturasDelLote.forEach(factura => porId.set(factura.id_factura, factura));
             return [...porId.values()];
@@ -493,8 +505,9 @@ export default function App() {
             const mitad = Math.ceil(lote.length / 2);
             await enviarLote(lote.slice(0, mitad), reintentarLectura);
             await enviarLote(lote.slice(mitad), reintentarLectura);
-          } else if (error.retryable && intento === 0) {
-            await enviarLote(lote, false, 1);
+          } else if (error.retryable && intento < 2) {
+            await new Promise(resolve => setTimeout(resolve, 500 * (intento + 1)));
+            await enviarLote(lote, false, intento + 1);
           } else {
             lote.forEach(file => erroresPorArchivo.set(file, [{ nombre: file.name, error: error.message }]));
           }
@@ -503,6 +516,7 @@ export default function App() {
 
       for (const lote of lotes) {
         await enviarLote(lote);
+        if (version !== sessionVersion.current) return { archivos_procesados: 0, archivos_totales: archivos.length, xmls_extraidos: 0, facturas_creadas: 0, errores_lectura: [] };
         archivosRevisados += lote.length;
         onProgress?.({
           archivos_revisados: archivosRevisados,
@@ -515,6 +529,7 @@ export default function App() {
       total.archivos_procesados = archivosConfirmados.size;
       const erroresCarga = [...erroresPorArchivo.values()].flat();
       total.errores_lectura = erroresCarga;
+      if (version !== sessionVersion.current) return { ...total, archivos_totales: archivos.length };
       if (erroresCarga.length) {
         showToast(`Se revisaron ${total.archivos_procesados} de ${archivos.length} archivos y se registraron ${total.facturas_nuevas} documento(s) nuevo(s). ${erroresCarga.length} archivo(s) siguen sin poder interpretarse; consulte la lista de errores.`, 'error');
       } else if (total.facturas_nuevas > 0) {
@@ -524,12 +539,13 @@ export default function App() {
       } else {
         showToast(`Se procesaron ${total.archivos_procesados} archivo(s), pero no se detectaron nuevas facturas válidas.`, 'info');
       }
-      await loadData();
+      if (version === sessionVersion.current) await loadData();
       return {
         ...total,
         archivos_totales: archivos.length
       };
     } catch (err) {
+      if (version !== sessionVersion.current) return { archivos_procesados: 0, archivos_totales: archivos.length, xmls_extraidos: 0, facturas_creadas: 0, errores_lectura: [] };
       const detalle = err instanceof Error ? err.message : 'Error desconocido.';
       showToast(`Error procesando archivos (${archivosConfirmados.size} de ${archivos.length} confirmados): ${detalle}`, 'error');
       throw err instanceof Error ? err : new Error(detalle);

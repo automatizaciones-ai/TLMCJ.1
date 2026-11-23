@@ -145,10 +145,11 @@ async function parsearPdfFactura(contenido: Buffer, fileName: string, nitEmpresa
   const texto = lineas.join('\n');
   const normalizado = normalizarPdf(texto);
   const esNotaCredito = /\bnota\s+(?:de\s+)?credito\b|\bcredit\s+note\b/.test(normalizado.slice(0, 5000));
+  const esNotaDebito = /\bnota\s+(?:de\s+)?debito\b|\bdebit\s+note\b/.test(normalizado.slice(0, 5000));
   const emisor = extraerPartePdf(lineas, 'emisor');
   const adquiriente = extraerPartePdf(lineas, 'adquiriente');
   const numero = texto.match(/^\s*(?:no\.?|n[uú]mero(?:\s+de\s+(?:factura|nota))?|consecutivo)\s*[:#-]?\s*([A-Z0-9][\w./-]{1,34})\s*$/im)?.[1]
-    || texto.match(/(?:factura|nota\s+(?:de\s+)?credito)[^\n]{0,80}?\b(?:no\.?|numero|n[uú]mero)\s*[:#-]?\s*([A-Z0-9][\w./-]{1,34})/i)?.[1]
+    || texto.match(/(?:factura|nota\s+(?:de\s+)?(?:credito|debito)|(?:credit|debit)\s+note)[^\n]{0,80}?\b(?:no\.?|numero|n[uú]mero)\s*[:#-]?\s*([A-Z0-9][\w./-]{1,34})/i)?.[1]
     || valorDespuesDeEtiqueta(lineas, /(?:numero\s+de\s+(?:factura|nota)|no\.?\s*(?:de\s+)?(?:factura|nota)?|consecutivo)\b/i);
   const fechaRaw = valorDespuesDeEtiqueta(lineas, /fecha\s+(?:de\s+)?(?:emision|expedicion|generacion|factura)\b/i);
   const fechaEncontrada = texto.match(/\b(20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]20\d{2})\b/)?.[1];
@@ -169,7 +170,9 @@ async function parsearPdfFactura(contenido: Buffer, fileName: string, nitEmpresa
   const ivaFinal = iva || Math.max(0, total - subtotalFinal);
   const totalFinal = total || subtotalFinal + ivaFinal;
   const signo = esNotaCredito ? -1 : 1;
-  const descripcion = esNotaCredito ? 'Nota de crédito según representación PDF' : 'Factura según representación PDF';
+  const descripcion = esNotaCredito
+    ? 'Nota de crédito según representación PDF'
+    : esNotaDebito ? 'Nota débito según representación PDF' : 'Factura según representación PDF';
   const cufe = texto.match(/\b(?:cufe|cude)\b\s*[:#-]?\s*([a-f0-9]{32,})/i)?.[1]
     || crypto.createHash('sha256').update(contenido).digest('hex');
   const montoLinea = signo * subtotalFinal;
@@ -193,7 +196,7 @@ async function parsearPdfFactura(contenido: Buffer, fileName: string, nitEmpresa
     forma_pago: /\bcontado\b/i.test(normalizado) ? 'Contado' : 'Crédito',
     medio_pago: 'Transferencia Débito',
     cuenta_gasto: tipo_operacion === 'VENTA' ? '41350101' : '519530',
-    tipo_comprobante: esNotaCredito ? 'Nota de Crédito' : 'Factura Electrónica',
+    tipo_comprobante: esNotaCredito ? 'Nota de Crédito' : esNotaDebito ? 'Nota Débito' : 'Factura Electrónica',
     cufe_hash: cufe,
     estado_revision: 'PENDIENTE',
     items: [{
@@ -331,9 +334,9 @@ function parsearParte(bloqueParte: string): ParteUbl {
   };
 }
 
-function parsearLineas(xml: string, esNotaCredito: boolean): LineaUbl[] {
-  const nombreLinea = esNotaCredito ? 'CreditNoteLine' : 'InvoiceLine';
-  const nombreCantidad = esNotaCredito ? 'CreditedQuantity' : 'InvoicedQuantity';
+function parsearLineas(xml: string, tipoDocumento: 'factura' | 'credito' | 'debito'): LineaUbl[] {
+  const nombreLinea = tipoDocumento === 'credito' ? 'CreditNoteLine' : tipoDocumento === 'debito' ? 'DebitNoteLine' : 'InvoiceLine';
+  const nombreCantidad = tipoDocumento === 'credito' ? 'CreditedQuantity' : tipoDocumento === 'debito' ? 'DebitedQuantity' : 'InvoicedQuantity';
   return bloques(xml, nombreLinea).map((l, i) => {
     const cantidad = num(etiqueta(l, nombreCantidad)) || 1;
     const subtotal = num(etiqueta(l, 'LineExtensionAmount'));
@@ -469,7 +472,7 @@ export class XmlUblParserService {
                 if (!facturas.length) {
                   erroresLectura.push({
                     nombre: `${zipFileName} → ${entry.fileName}`,
-                    error: 'No se encontró una factura o nota crédito UBL válida en el XML.'
+                    error: 'No se encontró una factura, nota crédito o nota débito UBL válida en el XML.'
                   });
                 }
                 propios.push(...facturas);
@@ -561,7 +564,7 @@ export class XmlUblParserService {
               if (!facturas.length) {
                 erroresLectura.push({
                   nombre: `${zipFileName} → ${entryName}`,
-                  error: 'No se encontró una factura o nota crédito UBL válida en el XML.'
+                  error: 'No se encontró una factura, nota crédito o nota débito UBL válida en el XML.'
                 });
               }
               propios.push(...facturas);
@@ -611,22 +614,22 @@ export class XmlUblParserService {
 
   /**
    * Parse DIAN UBL 2.1 XML content into canonical structured invoice object.
-   * Soporta Invoice, CreditNote y el contenedor AttachedDocument (CDATA o base64).
+   * Soporta Invoice, CreditNote, DebitNote y el contenedor AttachedDocument (CDATA o base64).
    */
   public parseXmlUbl(rawXmlContent: string, fileName: string = "factura.xml", nitEmpresaActiva: string = ""): ParsedXmlInvoice[] {
     try {
       let xmlContent = rawXmlContent.trim();
 
       if (/<(?:[\w-]+:)?AttachedDocument\b/i.test(xmlContent)) {
-        const cdataMatch = xmlContent.match(/<!\[CDATA\[([\s\S]*?<\/(?:[\w-]+:)?(?:Invoice|CreditNote)>)[\s\S]*?\]\]>/i);
-        if (cdataMatch && /<(?:[\w-]+:)?(?:Invoice|CreditNote)\b/.test(cdataMatch[1])) {
+        const cdataMatch = xmlContent.match(/<!\[CDATA\[([\s\S]*?<\/(?:[\w-]+:)?(?:Invoice|CreditNote|DebitNote)>)[\s\S]*?\]\]>/i);
+        if (cdataMatch && /<(?:[\w-]+:)?(?:Invoice|CreditNote|DebitNote)\b/.test(cdataMatch[1])) {
           xmlContent = cdataMatch[1].trim();
         } else {
-          const base64Match = xmlContent.match(/<(?:cbc:EmbeddedDocumentBinaryObject|cbc:Description)[^>]*>([A-Za-z0-9+/=\r\n]{60,})<\//i);
+          const base64Match = xmlContent.match(/<(?:[\w-]+:)?(?:EmbeddedDocumentBinaryObject|Description)[^>]*>([A-Za-z0-9+/=\r\n]{60,})<\//i);
           if (base64Match) {
             try {
               const decoded = Buffer.from(base64Match[1].replace(/\s+/g, ''), 'base64').toString('utf-8');
-              if (decoded.includes('<Invoice') || decoded.includes('<CreditNote')) {
+              if (/<(?:[\w-]+:)?(?:Invoice|CreditNote|DebitNote)\b/i.test(decoded)) {
                 xmlContent = decoded.trim();
               }
             } catch (e) {}
@@ -634,8 +637,8 @@ export class XmlUblParserService {
         }
       }
 
-      // Solo documentos UBL de factura o nota crédito
-      if (!/<(?:[\w-]+:)?(?:Invoice|CreditNote)\b/i.test(xmlContent)) {
+      // Solo documentos UBL de factura, nota crédito o nota débito
+      if (!/<(?:[\w-]+:)?(?:Invoice|CreditNote|DebitNote)\b/i.test(xmlContent)) {
         return [];
       }
 
@@ -645,7 +648,9 @@ export class XmlUblParserService {
         .replace(/<(?:[\w-]+:)?Signature\b[\s\S]*?<\/(?:[\w-]+:)?Signature>/gi, '');
 
       const isCreditNote = /<(?:[\w-]+:)?CreditNote\b/i.test(xml);
-      const lineasXml = isCreditNote ? 'CreditNoteLine' : 'InvoiceLine';
+      const isDebitNote = /<(?:[\w-]+:)?DebitNote\b/i.test(xml);
+      const tipoDocumento = isCreditNote ? 'credito' : isDebitNote ? 'debito' : 'factura';
+      const lineasXml = isCreditNote ? 'CreditNoteLine' : isDebitNote ? 'DebitNoteLine' : 'InvoiceLine';
       const encabezado = xml.replace(new RegExp(`<(?:[\\w-]+:)?${lineasXml}\\b[\\s\\S]*?</(?:[\\w-]+:)?${lineasXml}>`, 'gi'), '');
 
       // Número y fechas (del encabezado, no de las líneas)
@@ -678,7 +683,7 @@ export class XmlUblParserService {
       const medio_pago = MEDIOS_PAGO[codigoMedio] || (codigoMedio ? `Código ${codigoMedio}` : 'Transferencia Débito');
 
       // Líneas
-      const items = parsearLineas(xml, isCreditNote);
+      const items = parsearLineas(xml, tipoDocumento);
 
       // Totales del encabezado
       const totales = bloque(encabezado, 'LegalMonetaryTotal');
@@ -752,7 +757,7 @@ export class XmlUblParserService {
           forma_pago,
           medio_pago,
           cuenta_gasto,
-          tipo_comprobante: isCreditNote ? 'Nota de Crédito' : 'Factura Electrónica',
+          tipo_comprobante: isCreditNote ? 'Nota de Crédito' : isDebitNote ? 'Nota Débito' : 'Factura Electrónica',
           cufe_hash,
           estado_revision: 'PENDIENTE',
           items: lineas,
