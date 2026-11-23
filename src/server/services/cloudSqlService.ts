@@ -787,16 +787,33 @@ export class CloudSqlService {
   }
 
   public static async bulkCreateFacturas(facturas: Partial<Factura>[]): Promise<Factura[]> {
-    const results: Factura[] = [];
-    for (const f of facturas) {
-      try {
-        const created = await this.createFactura(f);
-        results.push(created);
-      } catch (err) {
-        console.warn('[CloudSQL] Error creating invoice in bulk:', f.factura_num, err);
-      }
+    const grupos = new Map<string, { factura: Partial<Factura>; indice: number }[]>();
+    facturas.forEach((factura, indice) => {
+      const clave = factura.cufe_hash
+        ? `${factura.id_empresa || 1}|${factura.cufe_hash}`
+        : `sin-cufe-${indice}`;
+      const grupo = grupos.get(clave) || [];
+      grupo.push({ factura, indice });
+      grupos.set(clave, grupo);
+    });
+
+    const entradas = [...grupos.values()];
+    const results: (Factura | undefined)[] = new Array(facturas.length);
+    const concurrencia = 5;
+
+    for (let inicio = 0; inicio < entradas.length; inicio += concurrencia) {
+      await Promise.all(entradas.slice(inicio, inicio + concurrencia).map(async grupo => {
+        for (const { factura, indice } of grupo) {
+          try {
+            results[indice] = await this.createFactura(factura);
+          } catch (err) {
+            console.warn('[CloudSQL] Error creating invoice in bulk:', factura.factura_num, err);
+          }
+        }
+      }));
     }
-    return results;
+
+    return results.filter((factura): factura is Factura => factura !== undefined);
   }
 
   public static async createFactura(data: Partial<Factura>): Promise<Factura> {
