@@ -37,3 +37,5 @@ services:
         sync: false
       - key: SMTP_FROM
         sync: false
+      - key: CORREOS_AUTORIZACION
+        sync: false

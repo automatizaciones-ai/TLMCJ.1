@@ -22,7 +22,6 @@ import type { Factura, FacturaItem, Usuario } from '../domain/types.ts';
 import crypto from 'crypto';
 import { hashPassword, isHashed, verifyPassword, matchesLegacyPassword } from '../services/passwordHasher.ts';
 import { startSession, endSession, getSessionUser } from '../services/sessionAuth.ts';
-import { mailer } from '../services/mailer.ts';
 import { secondsLocked, recordFailure, lockFor, clearAttempts } from '../services/attemptLimiter.ts';
 
 const router = Router();
@@ -109,19 +108,54 @@ function baseUrlAplicacion(req: Request): string {
   return appUrl.origin;
 }
 
+function textoComoHtml(texto: string): string {
+  return texto
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\r?\n/g, '<br>');
+}
+
+function correosAutorizacion(): string[] {
+  const configurados = (process.env.CORREOS_AUTORIZACION || '')
+    .split(/[,;\s]+/)
+    .map(c => c.trim().toLowerCase())
+    .filter(correoValido);
+  return configurados.length
+    ? [...new Set(configurados)]
+    : ['juan.yaya@tlm.net.co', 'automatizaciones@tlm.net.co'];
+}
+
+async function enviarCorreoTexto(destinatario: string, asunto: string, texto: string): Promise<void> {
+  const estado = CorreoService.estado();
+  if (!estado.configurado) {
+    throw new Error(`El servicio de correo no está configurado. ${estado.faltantes.length ? `Faltan: ${estado.faltantes.join(', ')}.` : estado.detalle}`);
+  }
+  const resultado = await CorreoService.enviar({
+    para: [destinatario],
+    asunto,
+    html: textoComoHtml(texto),
+    texto,
+    evento: 'SEGURIDAD'
+  });
+  if (!resultado.ok || resultado.simulado) {
+    throw new Error(resultado.error || 'El correo quedó en modo simulado porque no hay proveedor configurado.');
+  }
+}
+
 async function enviarCorreosRegistro(req: Request, user: Usuario, token: string): Promise<void> {
-  if (!mailer.enabled) throw new Error('El servicio de correo no está configurado.');
   const baseUrl = baseUrlAplicacion(req);
   const verificationUrl = `${baseUrl}/api/v1/auth/register/verify?token=${encodeURIComponent(token)}`;
   const urlConsola = `${baseUrl}/`;
   const avisos = [
-    mailer.send(
+    enviarCorreoTexto(
       user.email,
       'Confirma tu correo para solicitar acceso a Consola TLM',
       `Hola ${user.nombre_completo},\n\nPara confirmar que tienes acceso a este buzón, abre este enlace dentro de las próximas 24 horas:\n${verificationUrl}\n\nDespués de verificarlo, el equipo de TLM revisará tu solicitud y la relación de tu cuenta con TLM o una entidad conocida. Si se aprueba el acceso, al iniciar sesión deberás elegir una contraseña personal nueva.`
     ),
-    ...['juan.yaya@tlm.net.co', 'automatizaciones@tlm.net.co'].map(destinatario =>
-      mailer.send(
+    ...correosAutorizacion().map(destinatario =>
+      enviarCorreoTexto(
         destinatario,
         'Solicitud de autorización de cuenta - Consola TLM',
         `Se recibió una solicitud de acceso:\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\nCorreo verificado: Pendiente\n\nConfirme que conoce a la persona y su relación con TLM o con una entidad conocida. El usuario debe verificar primero que tiene acceso al buzón; después puede revisar y aprobar la solicitud en la sección Accesos de Consola TLM:\n${urlConsola}\n\nNo se incluye ni se envía la contraseña del usuario.`
@@ -167,9 +201,8 @@ function hashCodigo(codigo: string): string {
 
 /** Envía una contraseña provisional por correo. Devuelve false si el correo no está configurado o falla. */
 async function enviarProvisionalPorCorreo(user: any, password: string): Promise<boolean> {
-  if (!mailer.enabled) return false;
   try {
-    await mailer.send(
+    await enviarCorreoTexto(
       user.email,
       'Tu acceso a Consola TLM - contraseña provisional',
       `Hola ${user.nombre_completo},\n\nTu contraseña provisional es: ${password}\n\nAl iniciar sesión deberás cambiarla por una contraseña personal de mínimo 8 caracteres con letras y números.`
@@ -366,8 +399,8 @@ router.post('/auth/usuarios/:id/reset-password-admin', async (req: Request, res:
 router.post('/auth/recuperar-password/solicitar-codigo', async (req: Request, res: Response) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ detail: 'Ingresa tu correo electrónico corporativo.' });
-  if (!mailer.enabled) {
-    return res.status(503).json({ detail: 'El envío de códigos por correo no está configurado. Pide al administrador que defina SMTP_HOST en el servidor.' });
+  if (!CorreoService.estado().configurado) {
+    return res.status(503).json({ detail: 'El envío de códigos por correo no está configurado. Revisa el proveedor de correo en el servidor.' });
   }
   const correo = String(email).toLowerCase().trim();
   const claveCodigo = `codigo:${correo}`;
@@ -388,7 +421,7 @@ router.post('/auth/recuperar-password/solicitar-codigo', async (req: Request, re
 
   const codigoOtp = crypto.randomInt(100000, 1000000).toString();
   try {
-    await mailer.send(user.email, 'Código de seguridad - Consola TLM',
+    await enviarCorreoTexto(user.email, 'Código de seguridad - Consola TLM',
       `Hola ${user.nombre_completo},\n\nTu código de seguridad para restablecer la contraseña es: ${codigoOtp}\n\nExpira en 15 minutos. Si tú no lo solicitaste, ignora este correo y avisa a Juan Yaya (automatizaciones@tlm.net.co).`);
   } catch (e) {
     console.warn('[Correo] No se pudo enviar el código de recuperación:', e);
@@ -516,7 +549,7 @@ router.post('/auth/register', async (req: Request, res: Response) => {
     });
   }
   res.status(201).json({
-    mensaje: 'Solicitud guardada. Revisa tu correo y confirma el enlace; después, Juan Yaya o automatizaciones@tlm.net.co revisarán y aprobarán el acceso.',
+    mensaje: `Solicitud guardada. Revisa tu correo y confirma el enlace; después, ${correosAutorizacion().join(' o ')} revisarán y aprobarán el acceso.`,
     id_usuario: nuevo.id_usuario
   });
 });
@@ -541,9 +574,9 @@ router.get('/auth/register/verify', async (req: Request, res: Response) => {
   const mensaje = `<h1>Correo verificado</h1><p>Tu buzón quedó confirmado. La solicitud aún requiere la aprobación de un administrador de TLM.</p><p><a href="${baseUrl}/">Ir a Consola TLM</a></p>`;
   res.status(200).type('html').send(mensaje);
 
-  for (const destinatario of ['juan.yaya@tlm.net.co', 'automatizaciones@tlm.net.co']) {
+  for (const destinatario of correosAutorizacion()) {
     try {
-      await mailer.send(
+      await enviarCorreoTexto(
         destinatario,
         'Correo confirmado - solicitud de acceso a Consola TLM',
         `El usuario confirmó que tiene acceso al buzón.\n\nNombre: ${user.nombre_completo}\nCorreo: ${user.email}\n\nRevise si conoce a esta persona y su relación con TLM o una entidad conocida. Si autoriza el acceso, apruébelo en la sección Accesos:\n${baseUrl}/`
@@ -556,7 +589,7 @@ router.get('/auth/register/verify', async (req: Request, res: Response) => {
 
 router.post('/auth/register/resend-verification', async (req: Request, res: Response) => {
   const correo = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  if (!correoValido(correo) || !mailer.enabled) {
+  if (!correoValido(correo) || !CorreoService.estado().configurado) {
     return res.status(503).json({ detail: 'No fue posible reenviar el correo. Verifica la dirección y vuelve a intentar más tarde.' });
   }
   const claveReenvio = `registro:reenvio:${correo}`;
@@ -621,7 +654,7 @@ router.patch('/auth/usuarios/:id/aprobar', async (req: Request, res: Response) =
     await guardarCambiosUsuario(user, { activo: true, requiere_cambio_password: true });
     let correoEnviado = true;
     try {
-      await mailer.send(
+      await enviarCorreoTexto(
         user.email,
         'Tu acceso a Consola TLM fue aprobado',
         `Hola ${user.nombre_completo},\n\nUn administrador aprobó tu solicitud de acceso a Consola TLM. Inicia sesión con el correo ${user.email} y la contraseña que elegiste al registrarte. Por seguridad, tendrás que cambiarla por una nueva contraseña personal antes de continuar.`

@@ -88,7 +88,7 @@ class CorreoServiceClass {
 
   // ---------------- Configuración ----------------
   remitente(): string {
-    return env('CORREO_REMITENTE') || env('GOOGLE_OAUTH_ACCOUNT_EMAIL') || env('SMTP_USER') || '';
+    return env('CORREO_REMITENTE') || env('SMTP_FROM') || env('GOOGLE_OAUTH_ACCOUNT_EMAIL') || env('SMTP_USER') || '';
   }
 
   nombreRemitente(): string {
@@ -127,7 +127,7 @@ class CorreoServiceClass {
       if (!remitente) faltantes.push('CORREO_REMITENTE (dominio verificado en Resend)');
       detalle = 'Resend por HTTPS.';
     } else if (proveedor === 'SMTP') {
-      if (!env('SMTP_USER') || !env('SMTP_PASS')) faltantes.push('SMTP_USER / SMTP_PASS');
+      if (!env('SMTP_HOST')) faltantes.push('SMTP_HOST');
       detalle = `SMTP ${env('SMTP_HOST')}:${env('SMTP_PORT') || '587'}. Ojo: el plan gratuito de Render bloquea los puertos SMTP.`;
     } else {
       detalle = 'No hay proveedor de correo configurado: los mensajes solo quedan en el historial.';
@@ -180,7 +180,9 @@ class CorreoServiceClass {
 
   private desde(): string {
     const nombre = this.nombreRemitente().replace(/"/g, '');
-    return `"${nombre}" <${this.remitente()}>`;
+    const remitente = this.remitente().trim();
+    if (/^.+<[^<>]+>$/.test(remitente)) return remitente;
+    return remitente ? `"${nombre}" <${remitente}>` : nombre;
   }
 
   private async enviarResend(m: MensajeCorreo, para: string[], cc: string[]): Promise<string> {
@@ -210,7 +212,9 @@ class CorreoServiceClass {
         host: env('SMTP_HOST'),
         port: puerto,
         secure: env('SMTP_SECURE') ? env('SMTP_SECURE') === 'true' : puerto === 465,
-        auth: { user: env('SMTP_USER'), pass: env('SMTP_PASS') },
+        auth: env('SMTP_USER') || env('SMTP_PASS')
+          ? { user: env('SMTP_USER'), pass: env('SMTP_PASS') }
+          : undefined,
         connectionTimeout: 15000
       });
     }
