@@ -193,13 +193,17 @@ async function usuarioPorIdRegistro(id: number): Promise<Usuario | null> {
   return db.usuarios.find(u => u.id_usuario === id) || null;
 }
 
-async function aprobarRegistro(id: number): Promise<Usuario | null> {
+async function aprobarRegistro(id: number, permitirCorreoSinVerificar = false): Promise<Usuario | null> {
   if (await CloudSqlService.isCloudSqlOnline()) {
-    const usuario = await CloudSqlService.approvePendingRegistration(id);
+    const usuario = await CloudSqlService.approvePendingRegistration(id, permitirCorreoSinVerificar);
     if (usuario) guardarUsuarioLocal(usuario);
     return usuario;
   }
-  const usuario = db.usuarios.find(u => u.id_usuario === id && !u.activo && u.email_verified === true);
+  const usuario = db.usuarios.find(u =>
+    u.id_usuario === id &&
+    !u.activo &&
+    (permitirCorreoSinVerificar || u.email_verified === true)
+  );
   if (!usuario) return null;
   usuario.activo = true;
   usuario.requiere_cambio_password = true;
@@ -278,11 +282,15 @@ router.post('/auth/login', async (req: Request, res: Response) => {
 
   const user = await buscarUsuarioPorCorreo(correo);
   if (!user) return fallo('Credenciales inválidas. Verifica tu correo corporativo.');
-  if (user.email_verified === false) {
+  if (user.email_verified === false && mailer.enabled) {
     return res.status(403).json({ detail: 'Confirma tu correo desde el enlace enviado para continuar con la solicitud de acceso.' });
   }
   if (!user.activo) {
-    return res.status(403).json({ detail: 'Tu cuenta está pendiente de aprobación por el Administrador Maestro (Juan Yaya).' });
+    return res.status(403).json({
+      detail: user.email_verified === false
+        ? 'Tu solicitud está pendiente de aprobación manual. El administrador debe validar tu identidad por otro medio.'
+        : 'Tu cuenta está pendiente de aprobación por el Administrador Maestro (Juan Yaya).'
+    });
   }
   // La contraseña es obligatoria: sin ella nunca se inicia sesión
   if (!password || typeof password !== 'string' || !user.hashed_password) {
@@ -556,16 +564,17 @@ router.post('/auth/register', async (req: Request, res: Response) => {
   if (!correoValido(correo)) return res.status(400).json({ detail: 'Ingresa una dirección de correo válida.' });
   const checkRule = validatePasswordRule(password);
   if (!checkRule.ok) return res.status(400).json({ detail: checkRule.message });
-  if (!mailer.enabled) return res.status(503).json({ detail: 'El registro requiere correo. Configura SMTP_HOST en el servidor.' });
-  if (!aprobadoresRegistro().length) {
+  if (mailer.enabled && !aprobadoresRegistro().length) {
     return res.status(503).json({ detail: 'No hay correos válidos configurados para aprobar registros.' });
   }
-  let baseUrl: string;
-  try {
-    baseUrl = baseUrlAplicacion();
-  } catch (error) {
-    console.error('[Registro] URL pública no configurada:', error);
-    return res.status(503).json({ detail: 'El servidor no tiene una URL pública válida configurada para completar el registro.' });
+  let baseUrl: string | null = null;
+  if (mailer.enabled) {
+    try {
+      baseUrl = baseUrlAplicacion();
+    } catch (error) {
+      console.error('[Registro] URL pública no configurada:', error);
+      return res.status(503).json({ detail: 'El servidor no tiene una URL pública válida configurada para completar el registro.' });
+    }
   }
 
   if (registrosEnProceso.has(correo)) {
@@ -588,13 +597,13 @@ router.post('/auth/register', async (req: Request, res: Response) => {
     lockFor(claveRegistroIp, CODIGO_ESPERA_MS);
 
     const idNuevo = Math.max(...db.usuarios.map(u => u.id_usuario), 0) + 1;
-    const token = crypto.randomBytes(32).toString('hex');
-    const tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const token = mailer.enabled ? crypto.randomBytes(32).toString('hex') : null;
+    const tokenExpiresAt = token ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null;
     const nuevo: any = {
       id_usuario: idNuevo, nombre_completo: String(nombre_completo).trim(), email: correo,
       hashed_password: hashPassword(password), rol: 'Analista', activo: false,
       requiere_cambio_password: true, email_verified: false,
-      verification_token: hashCodigo(token), token_expires_at: tokenExpiresAt,
+      verification_token: token ? hashCodigo(token) : null, token_expires_at: tokenExpiresAt,
       empresas_ids: [1], permisos: getDefaultPermissions('Analista')
     };
     if (cloudOnline) {
@@ -610,18 +619,26 @@ router.post('/auth/register', async (req: Request, res: Response) => {
     }
 
     guardarUsuarioLocal(nuevo);
-    try {
-      await enviarCorreosRegistro(nuevo, token, baseUrl);
-    } catch (error: any) {
-      console.error('[Registro] No se pudieron enviar todos los correos de verificación/aprobación:', error);
-      return res.status(503).json({
-        detail: 'La solicitud quedó guardada, pero no se pudieron enviar todos los correos. Usa “Reenviar verificación” para intentarlo de nuevo.',
-        registro_creado: true
+    if (mailer.enabled) {
+      try {
+        await enviarCorreosRegistro(nuevo, token!, baseUrl!);
+      } catch (error: any) {
+        console.error('[Registro] No se pudieron enviar todos los correos de verificación/aprobación:', error);
+        return res.status(503).json({
+          detail: 'La solicitud quedó guardada, pero no se pudieron enviar todos los correos. Usa “Reenviar verificación” para intentarlo de nuevo.',
+          registro_creado: true
+        });
+      }
+      return res.status(201).json({
+        mensaje: 'Solicitud guardada. Revisa tu correo y confirma el enlace; después, el administrador recibirá los botones para aprobar o rechazar.',
+        id_usuario: nuevo.id_usuario
       });
     }
+
     return res.status(201).json({
-      mensaje: 'Solicitud guardada. Revisa tu correo y confirma el enlace; después, el administrador recibirá los botones para aprobar o rechazar.',
-      id_usuario: nuevo.id_usuario
+      mensaje: 'Solicitud guardada sin enviar correo. Un administrador debe revisar tu identidad por otro medio y aprobar el acceso desde Admin Usuarios & Cloud. Después podrás iniciar sesión con tu correo y contraseña.',
+      id_usuario: nuevo.id_usuario,
+      aprobacion_manual: true
     });
   } catch (error) {
     console.error('[Registro] Error inesperado al guardar la solicitud:', error);
@@ -826,12 +843,18 @@ router.get('/auth/usuarios', async (_req: Request, res: Response) => {
   try {
     const usuarios = await CloudSqlService.getUsuarios();
     if (usuarios.length > 0) {
-      return res.json(usuarios.map(usuarioPublico));
+      return       res.json(usuarios.map(usuario => ({
+        ...usuarioPublico(usuario),
+        aprobacion_manual_sin_correo: !mailer.enabled
+      })));
     }
   } catch (err) {
     console.warn('[CloudSQL] Fallback usuarios a DataStore local:', err);
   }
-  res.json(db.usuarios.map(usuarioPublico));
+  res.json(db.usuarios.map(usuario => ({
+    ...usuarioPublico(usuario),
+    aprobacion_manual_sin_correo: !mailer.enabled
+  })));
 });
 
 router.patch('/auth/usuarios/:id/aprobar', async (req: Request, res: Response) => {
@@ -839,32 +862,37 @@ router.patch('/auth/usuarios/:id/aprobar', async (req: Request, res: Response) =
   try {
     const user = await usuarioPorIdRegistro(id);
     if (!user) return res.status(404).json({ detail: 'No se encontró el usuario solicitado.' });
-    if (user.email_verified !== true) {
+    const permitirSinVerificar = !mailer.enabled;
+    if (user.email_verified !== true && !permitirSinVerificar) {
       return res.status(409).json({ detail: 'El usuario debe confirmar su correo antes de aprobar el acceso.' });
     }
     if (user.activo) {
       return res.json({ mensaje: 'El usuario ya está aprobado.', usuario: usuarioPublico(user), correo_enviado: false });
     }
 
-    const actualizado = await aprobarRegistro(id);
+    const actualizado = await aprobarRegistro(id, permitirSinVerificar);
     if (!actualizado) {
       return res.status(409).json({ detail: 'La solicitud ya fue procesada. Actualiza la lista de usuarios.' });
     }
-    let correoEnviado = true;
-    try {
-      await mailer.send(
-        actualizado.email,
-        'Tu acceso a Consola TLM fue aprobado',
-        `Hola ${actualizado.nombre_completo},\n\nUn administrador aprobó tu solicitud de acceso a Consola TLM. Inicia sesión con el correo ${actualizado.email} y la contraseña que elegiste al registrarte. Por seguridad, tendrás que cambiarla por una nueva contraseña personal antes de continuar.`
-      );
-    } catch (error) {
-      correoEnviado = false;
-      console.error('[Registro] No se pudo enviar el aviso de aprobación:', error);
+    let correoEnviado = false;
+    if (mailer.enabled) {
+      try {
+        await mailer.send(
+          actualizado.email,
+          'Tu acceso a Consola TLM fue aprobado',
+          `Hola ${actualizado.nombre_completo},\n\nUn administrador aprobó tu solicitud de acceso a Consola TLM. Inicia sesión con el correo ${actualizado.email} y la contraseña que elegiste al registrarte. Por seguridad, tendrás que cambiarla por una nueva contraseña personal antes de continuar.`
+        );
+        correoEnviado = true;
+      } catch (error) {
+        console.error('[Registro] No se pudo enviar el aviso de aprobación:', error);
+      }
     }
     res.json({
       mensaje: correoEnviado
         ? 'Usuario aprobado y aviso enviado por correo.'
-        : 'Usuario aprobado, pero no se pudo enviar el aviso por correo.',
+        : mailer.enabled
+          ? 'Usuario aprobado, pero no se pudo enviar el aviso por correo.'
+          : 'Usuario aprobado manualmente. Como el correo no está configurado, avísale por otro medio.',
       usuario: usuarioPublico(actualizado),
       correo_enviado: correoEnviado
     });

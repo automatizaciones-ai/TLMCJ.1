@@ -350,6 +350,45 @@ describe('autenticación', () => {
     expect((await loginCon(email, 'Personal2026x')).status).toBe(200);
   });
 
+  test('permite registro y aprobación manual cuando el correo no está configurado', async () => {
+    const { mailer } = await import('../src/server/services/mailer.ts');
+    const correoAnterior = process.env.APP_URL;
+    const aprobadoresAnteriores = process.env.APROBADOR_REGISTRO_EMAIL;
+    const mailerHabilitadoAnterior = mailer.enabled;
+    const email = 'solicitud.sin.correo@cuenta-conocida.co';
+    const admin = await loginCon('automatizaciones@tlm.net.co', 'admin_hashed_token');
+    expect(admin.status).toBe(200);
+
+    try {
+      attempts.clearAttempts('registro:ip:127.0.0.1');
+      mailer.enabled = false;
+      delete process.env.APP_URL;
+      delete process.env.APROBADOR_REGISTRO_EMAIL;
+      const correosAntes = correos.length;
+      const registro = await api('/auth/register', {
+        method: 'POST',
+        body: { nombre_completo: 'Solicitud Sin Correo', email, password: 'Inicial2026x' }
+      });
+      expect(registro.status).toBe(201);
+      expect(registro.json.aprobacion_manual).toBe(true);
+
+      const usuarios = await api('/auth/usuarios', { cookie: admin.cookie });
+      const usuario = usuarios.json.find((u: any) => u.email === email);
+      expect(usuario.email_verified).toBe(false);
+      expect(usuario.aprobacion_manual_sin_correo).toBe(true);
+      expect((await api(`/auth/usuarios/${usuario.id_usuario}/aprobar`, { method: 'PATCH', cookie: admin.cookie })).status).toBe(200);
+      expect(correos).toHaveLength(correosAntes);
+      expect((await loginCon(email, 'Inicial2026x')).status).toBe(200);
+    } finally {
+      mailer.enabled = mailerHabilitadoAnterior;
+      if (correoAnterior === undefined) delete process.env.APP_URL;
+      else process.env.APP_URL = correoAnterior;
+      if (aprobadoresAnteriores === undefined) delete process.env.APROBADOR_REGISTRO_EMAIL;
+      else process.env.APROBADOR_REGISTRO_EMAIL = aprobadoresAnteriores;
+      attempts.clearAttempts('registro:ip:127.0.0.1');
+    }
+  });
+
   test('el enlace firmado rechaza solo tras confirmación y no puede reutilizarse', async () => {
     attempts.clearAttempts('registro:ip:127.0.0.1');
     const admin = await loginCon('automatizaciones@tlm.net.co', 'admin_hashed_token');

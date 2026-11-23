@@ -709,15 +709,21 @@ export class CloudSqlService {
     }
   }
 
-  public static async approvePendingRegistration(id: number): Promise<Usuario | null> {
+  public static async approvePendingRegistration(id: number, allowUnverifiedEmail = false): Promise<Usuario | null> {
     try {
-      const updated = await drizzleDb.update(schema.users)
-        .set({ activo: true, requiereCambioPassword: true })
-        .where(and(
+      const condition = allowUnverifiedEmail
+        ? and(
+          eq(schema.users.id, id),
+          eq(schema.users.activo, false)
+        )
+        : and(
           eq(schema.users.id, id),
           eq(schema.users.activo, false),
           eq(schema.users.emailVerified, true)
-        ))
+        );
+      const updated = await drizzleDb.update(schema.users)
+        .set({ activo: true, requiereCambioPassword: true })
+        .where(condition)
         .returning();
       return updated[0] ? mapUsuarioRow(updated[0]) : null;
     } catch (error) {

@@ -987,7 +987,7 @@ export const AccesosView: React.FC<AccesosViewProps> = ({
               {usuarios.some(u => !u.activo) && (
                 <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl space-y-2">
                   <div className="text-xs font-bold text-amber-900">Pendientes de aprobación ({usuarios.filter(u => !u.activo).length})</div>
-                  <p className="text-[11px] text-amber-800">El usuario debe verificar primero que tiene acceso al correo. Al aprobarlo, deberá cambiar su contraseña antes de continuar.</p>
+                  <p className="text-[11px] text-amber-800">Con correo configurado, el usuario verifica el buzón antes de aprobar. Sin servicio de correo, verifica su identidad por otro medio y aprueba manualmente; deberá cambiar su contraseña al ingresar.</p>
                   <div className="space-y-1.5">
                     {usuarios.filter(u => !u.activo).map(u => (
                       <div key={u.id_usuario} className="flex flex-wrap items-center justify-between gap-2 bg-white border border-amber-200 rounded-xl px-3 py-2">
@@ -995,17 +995,21 @@ export const AccesosView: React.FC<AccesosViewProps> = ({
                           <div className="text-xs font-bold text-slate-800 truncate">{u.nombre_completo}</div>
                           <div className="text-[10px] text-slate-500 font-mono truncate">{u.email}</div>
                           <div className={`text-[10px] font-semibold mt-1 ${u.email_verified === false ? 'text-amber-700' : 'text-emerald-700'}`}>
-                            {u.email_verified === false ? 'Correo pendiente de verificación' : 'Correo verificado'}
+                            {u.email_verified === false
+                              ? u.aprobacion_manual_sin_correo ? 'Sin verificación de correo: validar identidad manualmente' : 'Correo pendiente de verificación'
+                              : 'Correo verificado'}
                           </div>
                         </div>
                         <div className="flex gap-1.5">
                           <button
                             onClick={() => onApproveUser(u.id_usuario)}
-                            disabled={u.email_verified === false}
-                            title={u.email_verified === false ? 'El usuario debe verificar su correo primero' : undefined}
+                            disabled={u.email_verified === false && !u.aprobacion_manual_sin_correo}
+                            title={u.email_verified === false
+                              ? u.aprobacion_manual_sin_correo ? 'Confirma la identidad por otro medio antes de aprobar' : 'El usuario debe verificar su correo primero'
+                              : undefined}
                             className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                           >
-                            Aprobar
+                            {u.email_verified === false && u.aprobacion_manual_sin_correo ? 'Aprobar manualmente' : 'Aprobar'}
                           </button>
                           <button onClick={() => onDeleteUser(u.id_usuario)} className="px-3 py-1 rounded-lg bg-white border border-red-300 text-red-700 hover:bg-red-50 text-[11px] font-bold cursor-pointer">Rechazar</button>
                         </div>
@@ -1169,9 +1173,12 @@ export const AccesosView: React.FC<AccesosViewProps> = ({
                               </span>
                               <button
                                 onClick={() => onApproveUser(u.id_usuario)}
+                                title={u.email_verified === false && u.aprobacion_manual_sin_correo
+                                  ? 'Confirma la identidad por otro medio antes de aprobar'
+                                  : undefined}
                                 className="px-2 py-0.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[10px] cursor-pointer"
                               >
-                                Aprobar
+                                {u.email_verified === false && u.aprobacion_manual_sin_correo ? 'Aprobar manualmente' : 'Aprobar'}
                               </button>
                             </div>
                           )}

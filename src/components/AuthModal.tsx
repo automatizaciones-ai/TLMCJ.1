@@ -37,6 +37,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [correoPendienteVerificacion, setCorreoPendienteVerificacion] = useState('');
+  const [solicitudAprobacionManual, setSolicitudAprobacionManual] = useState(false);
 
   // Forced Password Change State (First login with provisional password)
   const [mustChangeUser, setMustChangeUser] = useState<Usuario | null>(null);
@@ -438,6 +439,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
+    setSolicitudAprobacionManual(false);
     setIsLoading(true);
 
     try {
@@ -462,9 +464,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         throw new Error(data.detail || 'Error al registrar usuario');
       }
 
-      onShowToast(data.mensaje || 'Registro completado. Cuenta en cola de aprobación.');
+      const aprobacionManual = data.aprobacion_manual === true;
+      onShowToast(data.mensaje || 'Registro completado. Cuenta en cola de aprobación.', aprobacionManual ? 'info' : 'success');
       onRefreshUsers();
-      setCorreoPendienteVerificacion(email.trim());
+      setCorreoPendienteVerificacion(aprobacionManual ? '' : email.trim());
+      setSolicitudAprobacionManual(aprobacionManual);
       setTab('login');
       setEmail(email.trim());
       setPassword('');
@@ -801,6 +805,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   >
                     {isLoading ? 'Enviando...' : 'Reenviar verificación a este correo'}
                   </button>
+                </div>
+              )}
+              {solicitudAprobacionManual && (
+                <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl text-[11px] text-indigo-900">
+                  Tu solicitud quedó pendiente. No se envió correo: el administrador debe validar tu identidad por otro medio y aprobar el acceso. Luego podrás ingresar con la contraseña que registraste.
                 </div>
               )}
 
