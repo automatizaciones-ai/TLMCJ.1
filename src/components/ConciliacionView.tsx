@@ -219,6 +219,12 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
   const visiblesLibros = useMemo(() => (resultado?.faltan_en_libros || []).filter(m => coincide(m.fecha, m.descripcion, m.comprobante, m.tercero, m.valor)), [resultado, textoFiltro, fechaFiltro]);
   const todasSel = visiblesLibros.length > 0 && visiblesLibros.every(m => seleccion.includes(m.id));
   const totalSel = useMemo(() => (resultado?.faltan_en_libros || []).filter(m => seleccion.includes(m.id)).reduce((s, m) => s + m.valor, 0), [resultado, seleccion]);
+  const movimientosConciliados = useMemo(
+    () => (resultado?.conciliadas || []).reduce((total, c) => total + (c.ids_banco?.length || 1) + (c.ids_libro?.length || 1), 0),
+    [resultado]
+  );
+  const totalMovimientos = movimientosConciliados + (resultado?.faltan_en_libros.length || 0) + (resultado?.faltan_en_banco.length || 0);
+  const efectividadCruce = totalMovimientos ? Math.round((movimientosConciliados / totalMovimientos) * 100) : 0;
 
   const Tarjeta: React.FC<{ titulo: string; icono: React.ReactNode; b: Bloque; color: string; etiqueta: string }> = ({ titulo, icono, b, color, etiqueta }) => (
     <div className={`bg-white rounded-2xl border border-slate-200 shadow-xs p-4 border-l-4 ${color}`}>
@@ -313,6 +319,17 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
             </div>
           </div>
 
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs px-5 py-3 flex flex-wrap items-center gap-4">
+            <div className="min-w-[220px]">
+              <div className="text-xs font-bold text-slate-700">Efectividad de cruce</div>
+              <div className="text-[10px] text-slate-500">{movimientosConciliados} de {totalMovimientos} movimientos bancarios y contables conciliados</div>
+            </div>
+            <div className="flex-1 min-w-[120px] h-2 rounded-full bg-slate-100 overflow-hidden">
+              <div className="h-full rounded-full bg-[#271a82] transition-all duration-500" style={{ width: `${efectividadCruce}%` }} />
+            </div>
+            <div className="text-xl font-black text-[#271a82]">{efectividadCruce}%</div>
+          </div>
+
           {resultado.advertencias.length > 0 && (
             <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 space-y-1">
               {resultado.advertencias.map((a, i) => <div key={i} className="flex gap-1.5"><Info className="w-3.5 h-3.5 shrink-0" />{a}</div>)}
@@ -345,7 +362,7 @@ export const ConciliacionView: React.FC<Props> = ({ idEmpresa, nombreEmpresa, on
                       <tr key={i} title={`Banco${c.fecha_banco ? ` (${c.fecha_banco})` : ''}: ${c.descripcion_banco}${c.diferencia ? ` · diferencia ${formatoCOP(c.diferencia)}` : ''}${c.tipo ? `\n${TIPO_CRUCE[c.tipo]?.largo || ''}` : ''}`}>
                         <td className="py-1.5 px-3 pr-2 font-mono text-emerald-700 whitespace-nowrap">{c.fecha}{c.fecha_banco && c.fecha_banco !== c.fecha && <div className="text-[9px] text-slate-400">banco {c.fecha_banco}</div>}</td>
                         <td className="py-1.5 truncate max-w-[160px]">
-                          {c.tipo && c.tipo !== 'EXACTA' && <span className={`text-[9px] font-bold rounded px-1 mr-1 ${TIPO_CRUCE[c.tipo]?.clase}`}>{TIPO_CRUCE[c.tipo]?.corto}{(c.ids_banco?.length || 1) > 1 ? ` ×${c.ids_banco!.length}` : (c.ids_libro?.length || 1) > 1 ? ` ×${c.ids_libro!.length}` : ''}</span>}
+                          {c.tipo && <span className={`text-[9px] font-bold rounded px-1 mr-1 ${TIPO_CRUCE[c.tipo]?.clase}`}>{TIPO_CRUCE[c.tipo]?.corto || c.tipo}{(c.ids_banco?.length || 1) > 1 ? ` ×${c.ids_banco!.length}` : (c.ids_libro?.length || 1) > 1 ? ` ×${c.ids_libro!.length}` : ''}</span>}
                           <span className="font-mono text-[10px] bg-slate-100 rounded px-1 mr-1">{c.comprobante || '—'}</span>{c.detalle}
                         </td>
                         <td className={`py-1.5 px-3 text-right font-semibold whitespace-nowrap ${valorCls(c.valor)}`}>{formatoCOP(c.valor)}</td>

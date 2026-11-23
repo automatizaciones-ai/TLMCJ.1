@@ -109,6 +109,7 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
   const setFiltros = (f: FiltrosPeriodo) => (onFiltrosChange ? onFiltrosChange(f) : setFiltrosLocal(f));
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('TODOS');
+  const [casillaFilter, setCasillaFilter] = useState('TODOS');
   const [tamPagina, setTamPagina] = useState<number | 'all'>(25);
   const [pagina, setPagina] = useState(1);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -177,14 +178,16 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
       f.factura_num.toLowerCase().includes(s) ||
       f.proveedor.toLowerCase().includes(s) ||
       f.nit_tercero.includes(s) ||
+      f.cuenta_gasto.includes(s) ||
       (f.descripcion_item || '').toLowerCase().includes(s) ||
       (f.items || []).some(i => i.descripcion_item.toLowerCase().includes(s));
     const okEstado = statusFilter === 'TODOS' || f.estado_revision === statusFilter;
+    const okCasilla = casillaFilter === 'TODOS' || String(f.casilla_350) === casillaFilter;
     const okTipo = filtros.tipo === 'TODOS' || (f.tipo_operacion || 'COMPRA') === filtros.tipo;
     const okDesde = !filtros.desde || (f.fecha || '') >= filtros.desde;
     const okHasta = !filtros.hasta || (f.fecha || '') <= filtros.hasta;
-    return okBusqueda && okEstado && okTipo && okDesde && okHasta;
-  }), [facturas, searchTerm, statusFilter, filtros]);
+    return okBusqueda && okEstado && okCasilla && okTipo && okDesde && okHasta;
+  }), [facturas, searchTerm, statusFilter, casillaFilter, filtros]);
 
   const totalPaginas = tamPagina === 'all' ? 1 : Math.max(1, Math.ceil(filteredFacturas.length / tamPagina));
   const paginaSegura = Math.min(pagina, totalPaginas);
@@ -195,7 +198,7 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
   const facturasUnicas = useMemo(() => new Set(facturas.map(f => f.cufe_hash)).size, [facturas]);
   const lineasContables = useMemo(() => facturas.reduce((s, f) => s + (f.items?.length || 1), 0), [facturas]);
 
-  const filtrosActivos = Boolean(searchTerm || statusFilter !== 'TODOS' || filtros.tipo !== 'TODOS' || filtros.desde || filtros.hasta);
+  const filtrosActivos = Boolean(searchTerm || statusFilter !== 'TODOS' || casillaFilter !== 'TODOS' || filtros.tipo !== 'TODOS' || filtros.desde || filtros.hasta);
   const idsObjetivo = () => (selectedIds.length ? selectedIds : filteredFacturas.map(f => f.id_factura));
   const consultaIds = () => (selectedIds.length || filtrosActivos ? `?ids=${idsObjetivo().join(',')}` : '');
   const objetivoTexto = selectedIds.length ? `${selectedIds.length} seleccionadas` : filtrosActivos ? `${filteredFacturas.length} filtradas` : 'todas';
@@ -475,6 +478,14 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
               <option value="PENDIENTE">Pendientes</option>
               <option value="AUDITADA">Auditadas</option>
               <option value="SINCRONIZADA_SIIGO">Sincronizadas Siigo</option>
+              <option value="RECHAZADA">Rechazadas</option>
+            </select>
+            <select value={casillaFilter} onChange={e => { setCasillaFilter(e.target.value); setPagina(1); }} className="bg-[#f8f9fa] border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-700 font-medium">
+              <option value="TODOS">Todas las casillas F350</option>
+              <option value="61">C.61 · Honorarios</option>
+              <option value="62">C.62 · Servicios</option>
+              <option value="63">C.63 · Arrendamientos</option>
+              <option value="64">C.64 · Compras</option>
             </select>
             <button onClick={() => { onRefresh?.(); cargarCatalogos(true); }} title="Refrescar" className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 cursor-pointer"><RefreshCw className="w-3.5 h-3.5" /></button>
           </div>
@@ -582,6 +593,12 @@ export const FacturasView: React.FC<FacturasViewProps> = ({
                     <td className="py-2.5 px-2">
                       <div className="font-bold text-[#271a82] whitespace-nowrap">{f.factura_num}</div>
                       <span className={`inline-block mt-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold ${esVenta ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>{esVenta ? 'Venta' : 'Compra'}</span>
+                      <span className={`inline-block mt-0.5 ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                        f.estado_revision === 'AUDITADA' ? 'bg-blue-100 text-blue-700' :
+                        f.estado_revision === 'SINCRONIZADA_SIIGO' ? 'bg-emerald-100 text-emerald-700' :
+                        f.estado_revision === 'RECHAZADA' ? 'bg-red-100 text-red-700' :
+                        'bg-amber-100 text-amber-700'
+                      }`}>{f.estado_revision}</span>
                       <button onClick={() => onInspectCufe(f)} className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-[#e64519] font-mono cursor-pointer mt-0.5" title="Inspeccionar CUFE UBL 2.1"><ShieldCheck className="w-3 h-3 text-emerald-600" />{(f.cufe_hash || '').substring(0, 8)}…</button>
                       {f.siigo_id && <div className="text-[9px] font-mono text-emerald-700 font-bold">{f.siigo_id}</div>}
                     </td>
