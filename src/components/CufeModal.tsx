@@ -1,17 +1,26 @@
 import React from 'react';
 import { Factura } from '../types/index.ts';
-import { X, CheckCircle, ShieldCheck, Copy, FileCode, Building2 } from 'lucide-react';
+import { X, ShieldCheck, Copy } from 'lucide-react';
 
 interface CufeModalProps {
   factura: Factura | null;
   onClose: () => void;
+  onShowToast?: (message: string, type?: 'success' | 'info' | 'error') => void;
 }
 
-export const CufeModal: React.FC<CufeModalProps> = ({ factura, onClose }) => {
+export const CufeModal: React.FC<CufeModalProps> = ({ factura, onClose, onShowToast }) => {
   if (!factura) return null;
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      if (onShowToast) onShowToast('CUFE copiado al portapapeles.');
+      else alert('CUFE copiado al portapapeles.');
+    } catch {
+      const message = 'No se pudo copiar el CUFE al portapapeles.';
+      if (onShowToast) onShowToast(message, 'error');
+      else alert(message);
+    }
   };
 
   const formatCOP = (num: number) => {
@@ -21,6 +30,14 @@ export const CufeModal: React.FC<CufeModalProps> = ({ factura, onClose }) => {
       maximumFractionDigits: 0
     }).format(num || 0);
   };
+
+  const totalFactura = factura.total ?? factura.subtotal + factura.iva;
+  const signoFactura = Math.sign(totalFactura || factura.subtotal || 1);
+  const retencionFuente = Math.abs(factura.retencion_valor || 0);
+  const retencionIca = Math.round(Math.abs(factura.subtotal || 0) * (factura.reteica_tarifa || 0) / 1000);
+  const retencionIva = Math.round(Math.abs(factura.iva || 0) * (factura.reteiva_porc || 0) / 100);
+  const impuestoConsumo = Math.abs((factura.items || []).reduce((total, item) => total + (item.inc || 0), 0));
+  const netoEstimado = totalFactura - signoFactura * (retencionFuente + retencionIca + retencionIva);
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -68,12 +85,12 @@ export const CufeModal: React.FC<CufeModalProps> = ({ factura, onClose }) => {
               <span className="text-[11px] text-slate-500 font-semibold block uppercase">Emisor / Proveedor</span>
               <span className="text-sm font-bold text-slate-800 block truncate mt-0.5">{factura.proveedor}</span>
               <span className="text-xs text-slate-600 block">NIT: {factura.nit_tercero}</span>
-              <span className="text-xs text-slate-500 block">{factura.ciudad || 'Bogotá D.C.'}</span>
+              <span className="text-xs text-slate-500 block">{factura.ciudad || factura.departamento || '—'}</span>
             </div>
             <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
               <span className="text-[11px] text-slate-500 font-semibold block uppercase">Condiciones Comerciales</span>
-              <span className="text-sm font-bold text-slate-800 block mt-0.5">{factura.forma_pago}</span>
-              <span className="text-xs text-slate-600 block">Medio: {factura.medio_pago}</span>
+              <span className="text-sm font-bold text-slate-800 block mt-0.5">{factura.forma_pago || '—'}</span>
+              <span className="text-xs text-slate-600 block">Medio: {factura.medio_pago || '—'}</span>
               <span className="text-xs text-slate-500 block">Fecha: {factura.fecha}</span>
             </div>
           </div>
@@ -89,22 +106,38 @@ export const CufeModal: React.FC<CufeModalProps> = ({ factura, onClose }) => {
                 <span className="font-semibold text-slate-800">{formatCOP(factura.subtotal)}</span>
               </div>
               <div className="flex justify-between text-slate-600">
-                <span>IVA 19%</span>
+                <span>IVA</span>
                 <span className="font-semibold text-slate-800">{formatCOP(factura.iva)}</span>
+              </div>
+              {impuestoConsumo > 0 && (
+                <div className="flex justify-between text-slate-600">
+                  <span>Impuesto al consumo (INC)</span>
+                  <span className="font-semibold text-slate-800">{formatCOP(impuestoConsumo)}</span>
+                </div>
+              )}
+              <div className="flex justify-between text-slate-600">
+                <span>Total factura</span>
+                <span className="font-semibold text-slate-800">{formatCOP(totalFactura)}</span>
               </div>
               <div className="flex justify-between text-amber-700 bg-amber-50 p-1.5 rounded-lg">
                 <span>Retención en la Fuente ({factura.retencion_porc}% - Casilla {factura.casilla_350})</span>
-                <span className="font-bold">-{formatCOP(factura.retencion_valor)}</span>
+                <span className="font-bold">-{formatCOP(retencionFuente)}</span>
               </div>
-              {factura.reteiva_porc ? (
+              {retencionIca > 0 && (
+                <div className="flex justify-between text-orange-700 bg-orange-50 p-1.5 rounded-lg">
+                  <span>ReteICA ({factura.reteica_tarifa}‰)</span>
+                  <span className="font-bold">-{formatCOP(retencionIca)}</span>
+                </div>
+              )}
+              {retencionIva > 0 ? (
                 <div className="flex justify-between text-purple-700 bg-purple-50 p-1.5 rounded-lg">
                   <span>ReteIVA ({factura.reteiva_porc}%)</span>
-                  <span className="font-bold">-{formatCOP((factura.iva * factura.reteiva_porc) / 100)}</span>
+                  <span className="font-bold">-{formatCOP(retencionIva)}</span>
                 </div>
               ) : null}
               <div className="pt-2 border-t border-slate-200 flex justify-between text-sm font-black text-slate-900">
                 <span>Neto a Pagar Estimado</span>
-                <span>{formatCOP((factura.subtotal + factura.iva) - factura.retencion_valor)}</span>
+                <span>{formatCOP(netoEstimado)}</span>
               </div>
             </div>
           </div>

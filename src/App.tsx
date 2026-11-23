@@ -1006,6 +1006,7 @@ export default function App() {
         <CufeModal
           factura={selectedCufeFactura}
           onClose={() => setSelectedCufeFactura(null)}
+          onShowToast={showToast}
         />
       )}
 
