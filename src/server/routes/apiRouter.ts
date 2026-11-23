@@ -1825,6 +1825,12 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
     } as Factura));
   }
 
+  if (processedFacturas.length > 0 && processedFacturas.length < parsedFacturas.length) {
+    return res.status(503).json({
+      detail: `La base de datos solo guardó ${processedFacturas.length} de ${parsedFacturas.length} documentos. Se reintentará el lote en grupos más pequeños.`
+    });
+  }
+
   const duplicadasCount = processedFacturas.filter((f: any) => f._duplicada).length;
   const facturasNuevas = processedFacturas.filter((f: any) => !f._duplicada);
   processedFacturas = processedFacturas.map((f: any) => { const { _duplicada, ...resto } = f; return resto as Factura; });

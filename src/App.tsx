@@ -7,7 +7,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Sidebar } from './components/Sidebar.tsx';
 import { Header } from './components/Header.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
-import { FacturasView, FiltrosPeriodo } from './components/FacturasView.tsx';
+import { FacturasView, FiltrosPeriodo, type ProgresoCargaArchivos } from './components/FacturasView.tsx';
 import { NuevaEmpresaModal } from './components/EmpresaSelector.tsx';
 import { CentroFiscalView } from './components/CentroFiscalView.tsx';
 import { ConciliacionView } from './components/ConciliacionView.tsx';
@@ -39,6 +39,7 @@ type ResultadoCargaLote = {
   compras_nuevas?: number;
   archivados?: { ok: boolean }[];
   errores_lectura?: { nombre: string; error: string; indice?: number }[];
+  facturas?: Factura[];
 };
 
 type ErrorCarga = Error & { retryable?: boolean };
@@ -390,10 +391,14 @@ export default function App() {
   };
 
   // Actions
-  const handleUploadXml = async (files: FileList): Promise<{ archivos_procesados: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number; errores_lectura: { nombre: string; error: string }[] }> => {
+  const handleUploadXml = async (
+    files: FileList,
+    onProgress?: (progress: ProgresoCargaArchivos) => void
+  ): Promise<{ archivos_procesados: number; archivos_totales: number; xmls_extraidos: number; facturas_creadas: number; facturas_duplicadas?: number; facturas_nuevas?: number; pdfs_originales?: number; errores_lectura: { nombre: string; error: string }[] }> => {
     const archivos = Array.from(files);
     const archivosConfirmados = new Set<File>();
     const erroresPorArchivo = new Map<File, { nombre: string; error: string }[]>();
+    let archivosRevisados = 0;
     try {
       const lotes = crearLotesArchivos(archivos);
       const total = {
@@ -441,8 +446,19 @@ export default function App() {
             error.retryable = true;
             throw error;
           }
+          const facturasDelLote = data.facturas;
+          if (!Array.isArray(facturasDelLote)) {
+            const error = new Error('El servidor no devolvió las facturas guardadas en el lote.') as ErrorCarga;
+            error.retryable = true;
+            throw error;
+          }
 
           lote.forEach(file => archivosConfirmados.add(file));
+          setFacturas(prev => {
+            const porId = new Map(prev.map(factura => [factura.id_factura, factura]));
+            facturasDelLote.forEach(factura => porId.set(factura.id_factura, factura));
+            return [...porId.values()];
+          });
           total.xmls_extraidos += Number(data.xmls_extraidos ?? 0);
           total.facturas_creadas += Number(data.facturas_creadas ?? 0);
           total.facturas_duplicadas += Number(data.facturas_duplicadas ?? 0);
@@ -485,7 +501,16 @@ export default function App() {
         }
       };
 
-      for (const lote of lotes) await enviarLote(lote);
+      for (const lote of lotes) {
+        await enviarLote(lote);
+        archivosRevisados += lote.length;
+        onProgress?.({
+          archivos_revisados: archivosRevisados,
+          archivos_totales: archivos.length,
+          facturas_nuevas: total.facturas_nuevas,
+          archivos_con_error: erroresPorArchivo.size
+        });
+      }
 
       total.archivos_procesados = archivosConfirmados.size;
       const erroresCarga = [...erroresPorArchivo.values()].flat();
@@ -501,7 +526,8 @@ export default function App() {
       }
       await loadData();
       return {
-        ...total
+        ...total,
+        archivos_totales: archivos.length
       };
     } catch (err) {
       const detalle = err instanceof Error ? err.message : 'Error desconocido.';
