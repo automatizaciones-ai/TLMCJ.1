@@ -1,4 +1,9 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { pipeline } from 'stream/promises';
+import * as yauzl from 'yauzl';
 import JSZip from 'jszip';
 
 export interface ParteUbl {
@@ -246,6 +251,91 @@ export class XmlUblParserService {
     return this.parseXmlUbl(this.bufferATexto(buffer), fileName, nitEmpresaActiva);
   }
 
+  public async parseFilePath(filePath: string, fileName: string = "factura.xml", nitEmpresaActiva: string = ""): Promise<ParsedXmlInvoice[]> {
+    const handle = await fs.promises.open(filePath, 'r');
+    let signature: Buffer;
+    try {
+      signature = Buffer.alloc(4);
+      await handle.read(signature, 0, signature.length, 0);
+    } finally {
+      await handle.close();
+    }
+
+    const isZip = fileName.toLowerCase().endsWith('.zip') ||
+      (signature[0] === 0x50 && signature[1] === 0x4B && signature[2] === 0x03 && signature[3] === 0x04);
+    if (isZip) return this.parseZipFilePath(filePath, fileName, nitEmpresaActiva);
+
+    return this.parseXmlUbl(this.bufferATexto(await fs.promises.readFile(filePath)), fileName, nitEmpresaActiva);
+  }
+
+  private async parseZipFilePath(zipPath: string, zipFileName: string, nitEmpresaActiva: string): Promise<ParsedXmlInvoice[]> {
+    const results: ParsedXmlInvoice[] = [];
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'tlm-zip-'));
+    const pendientes: { filePath: string; nombre: string }[] = [{ filePath: zipPath, nombre: zipFileName }];
+    let nestedIndex = 0;
+
+    try {
+      while (pendientes.length) {
+        const actual = pendientes.pop()!;
+        let zip: yauzl.ZipFile;
+        try {
+          zip = await yauzl.openPromise(actual.filePath, { lazyEntries: true });
+        } catch (err) {
+          if (actual.filePath === zipPath) throw err;
+          console.warn(`[XML-Parser] No se pudo abrir el ZIP anidado "${actual.nombre}":`, err);
+          continue;
+        }
+
+        const propios: ParsedXmlInvoice[] = [];
+        const pdfs: { nombre: string; contenido: Buffer }[] = [];
+        const zipsInternos: { filePath: string; nombre: string }[] = [];
+
+        try {
+          for await (const entry of zip.eachEntry()) {
+            const lower = entry.fileName.toLowerCase();
+            const nombreBase = entry.fileName.split('/').pop() || '';
+            if (entry.fileName.endsWith('/') || entry.fileName.includes('__MACOSX') || nombreBase.startsWith('.')) continue;
+            const esXml = lower.endsWith('.xml');
+            const esPdf = lower.endsWith('.pdf');
+            const esZip = lower.endsWith('.zip');
+            if (!esXml && !esPdf && !esZip) continue;
+
+            try {
+              const stream = await zip.openReadStreamPromise(entry);
+              if (esXml) {
+                const chunks: Buffer[] = [];
+                for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                propios.push(...this.parseXmlUbl(this.bufferATexto(Buffer.concat(chunks)), entry.fileName, nitEmpresaActiva));
+              } else if (esPdf) {
+                const chunks: Buffer[] = [];
+                for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                const contenido = Buffer.concat(chunks);
+                if (contenido.subarray(0, 5).toString('latin1') === '%PDF-') pdfs.push({ nombre: nombreBase, contenido });
+              } else if (esZip) {
+                const filePath = path.join(tempDir, `${nestedIndex++}.zip`);
+                await pipeline(stream, fs.createWriteStream(filePath));
+                zipsInternos.push({ filePath, nombre: entry.fileName });
+              }
+            } catch (err) {
+              console.warn(`[XML-Parser] Error extrayendo "${entry.fileName}" dentro de ${actual.nombre}:`, err);
+            }
+          }
+        } finally {
+          zip.close();
+        }
+
+        emparejarPdfs(propios, pdfs);
+        results.push(...propios);
+        for (let i = zipsInternos.length - 1; i >= 0; i--) pendientes.push(zipsInternos[i]);
+        console.log(`[XML-Parser] ZIP "${actual.nombre}": ${propios.length} documentos UBL extraídos.`);
+      }
+    } finally {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    }
+
+    return results;
+  }
+
   private bufferATexto(buffer: Buffer): string {
     let text = buffer.toString('utf-8');
     if (/encoding=["'](?:ISO-8859-1|latin1|windows-1252)["']/i.test(text.substring(0, 200))) {
@@ -260,37 +350,44 @@ export class XmlUblParserService {
   /**
    * Unpacks a ZIP archive and extracts all contained XML invoices (also nested ZIPs, as sent by many DIAN providers)
    */
-  public async parseZipBuffer(zipBuffer: Buffer, zipFileName: string, nitEmpresaActiva: string = "", profundidad = 0): Promise<ParsedXmlInvoice[]> {
+  public async parseZipBuffer(zipBuffer: Buffer, zipFileName: string, nitEmpresaActiva: string = ""): Promise<ParsedXmlInvoice[]> {
     const results: ParsedXmlInvoice[] = [];
-    try {
-      const zip = await JSZip.loadAsync(zipBuffer);
-      const nombres = Object.keys(zip.files).filter(name => !zip.files[name].dir && !name.includes('__MACOSX') && !name.split('/').pop()!.startsWith('.'));
-      // Documentos de este nivel del paquete y sus PDF: se emparejan entre sí (los ZIP internos se emparejan por separado)
-      const propios: ParsedXmlInvoice[] = [];
-      const pdfs: { nombre: string; contenido: Buffer }[] = [];
+    const pendientes: { buffer: Buffer; nombre: string }[] = [{ buffer: zipBuffer, nombre: zipFileName }];
 
-      for (const entryName of nombres) {
-        const lower = entryName.toLowerCase();
-        try {
-          if (lower.endsWith('.xml')) {
-            const fileData = await zip.files[entryName].async('nodebuffer');
-            propios.push(...this.parseXmlUbl(this.bufferATexto(fileData), entryName, nitEmpresaActiva));
-          } else if (lower.endsWith('.pdf')) {
-            const contenido = await zip.files[entryName].async('nodebuffer');
-            if (contenido.subarray(0, 5).toString('latin1') === '%PDF-') pdfs.push({ nombre: entryName.split('/').pop()!, contenido });
-          } else if (lower.endsWith('.zip') && profundidad < 2) {
-            const interno = await zip.files[entryName].async('nodebuffer');
-            results.push(...(await this.parseZipBuffer(interno, entryName, nitEmpresaActiva, profundidad + 1)));
+    while (pendientes.length) {
+      const actual = pendientes.pop()!;
+      try {
+        const zip = await JSZip.loadAsync(actual.buffer);
+        const nombres = Object.keys(zip.files).filter(name => !zip.files[name].dir && !name.includes('__MACOSX') && !name.split('/').pop()!.startsWith('.'));
+        const propios: ParsedXmlInvoice[] = [];
+        const pdfs: { nombre: string; contenido: Buffer }[] = [];
+        const zipsInternos: { buffer: Buffer; nombre: string }[] = [];
+
+        for (const entryName of nombres) {
+          const lower = entryName.toLowerCase();
+          try {
+            if (lower.endsWith('.xml')) {
+              const fileData = await zip.files[entryName].async('nodebuffer');
+              propios.push(...this.parseXmlUbl(this.bufferATexto(fileData), entryName, nitEmpresaActiva));
+            } else if (lower.endsWith('.pdf')) {
+              const contenido = await zip.files[entryName].async('nodebuffer');
+              if (contenido.subarray(0, 5).toString('latin1') === '%PDF-') pdfs.push({ nombre: entryName.split('/').pop()!, contenido });
+            } else if (lower.endsWith('.zip')) {
+              const interno = await zip.files[entryName].async('nodebuffer');
+              zipsInternos.push({ buffer: interno, nombre: entryName });
+            }
+          } catch (err) {
+            console.warn(`[XML-Parser] Error extrayendo "${entryName}" dentro de ${actual.nombre}:`, err);
           }
-        } catch (err) {
-          console.warn(`[XML-Parser] Error extrayendo "${entryName}" dentro de ${zipFileName}:`, err);
         }
+
+        emparejarPdfs(propios, pdfs);
+        results.push(...propios);
+        for (let i = zipsInternos.length - 1; i >= 0; i--) pendientes.push(zipsInternos[i]);
+        console.log(`[XML-Parser] ZIP "${actual.nombre}": ${propios.length} documentos UBL extraídos, ${propios.filter(r => r.pdf_original).length} con PDF original.`);
+      } catch (zipErr) {
+        console.error(`[XML-Parser] Error leyendo archivo ZIP ${actual.nombre}:`, zipErr);
       }
-      emparejarPdfs(propios, pdfs);
-      results.unshift(...propios);
-      console.log(`[XML-Parser] ZIP "${zipFileName}": ${results.length} documentos UBL extraídos, ${results.filter(r => r.pdf_original).length} con PDF original.`);
-    } catch (zipErr) {
-      console.error(`[XML-Parser] Error leyendo archivo ZIP ${zipFileName}:`, zipErr);
     }
     return results;
   }
