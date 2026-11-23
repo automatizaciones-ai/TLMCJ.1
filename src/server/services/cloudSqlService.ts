@@ -252,6 +252,8 @@ export class CloudSqlService {
       `ALTER TABLE users ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMP`,
       `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT TRUE`,
       `ALTER TABLE users ALTER COLUMN hashed_password TYPE TEXT`,
+      `ALTER TABLE facturas DROP CONSTRAINT IF EXISTS facturas_cufe_hash_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS facturas_id_empresa_cufe_hash_key ON facturas (id_empresa, cufe_hash)`,
       `CREATE INDEX IF NOT EXISTS idx_facturas_empresa_cufe ON facturas (id_empresa, cufe_hash)`,
       `SELECT setval('users_id_seq', (SELECT GREATEST(COALESCE(max(id), 0), 20) FROM users))`,
       `SELECT setval('empresas_id_seq', (SELECT GREATEST(COALESCE(max(id), 0), 10) FROM empresas))`,
