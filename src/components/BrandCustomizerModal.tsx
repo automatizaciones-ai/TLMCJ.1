@@ -423,31 +423,31 @@ export const BrandCustomizerModal: React.FC<BrandCustomizerModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Navigation Tabs */}
-        <div className="flex items-center gap-1 px-5 pt-3 bg-white border-b border-slate-200 overflow-x-auto">
+{/* Modal Navigation Tabs */}
+        <div className="shrink-0 min-h-[2cm] grid grid-cols-1 sm:grid-cols-3 gap-2.5 px-5 py-2.5 bg-white border-b border-slate-200 items-stretch">
           <button
             onClick={() => setActiveTab('variants')}
-            className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition cursor-pointer flex items-center gap-2 shrink-0 ${
+            className={`h-full px-3 py-2 text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-2 text-center border ${
               activeTab === 'variants'
-                ? 'bg-slate-50 text-[#271a82] border-t-2 border-[#271a82] shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                ? 'bg-slate-50 text-[#271a82] border-[#271a82]/30 border-t-2 border-t-[#271a82] shadow-xs'
+                : 'text-slate-600 border-slate-200/80 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Layers className="w-4 h-4 text-[#271a82]" />
-            Logotipos Oficiales ({logoOptions.length})
+            <Layers className="w-4 h-4 text-[#271a82] shrink-0" />
+            <span>Logotipos Oficiales ({logoOptions.length})</span>
           </button>
 
           <button
             onClick={() => setActiveTab('colors')}
-            className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition cursor-pointer flex items-center gap-2 shrink-0 ${
+            className={`h-full px-3 py-2 text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-2 text-center border ${
               activeTab === 'colors'
-                ? 'bg-slate-50 text-[#271a82] border-t-2 border-[#fa9d1c] shadow-xs font-black'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                ? 'bg-slate-50 text-[#271a82] border-[#fa9d1c]/40 border-t-2 border-t-[#fa9d1c] shadow-xs font-black'
+                : 'text-slate-600 border-slate-200/80 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Palette className="w-4 h-4 text-[#fa9d1c]" />
+            <Palette className="w-4 h-4 text-[#fa9d1c] shrink-0" />
             <span>Colores de la Plataforma (Menú & Botones)</span>
-            <div className="flex items-center -space-x-1">
+            <div className="flex items-center -space-x-1 shrink-0">
               <span 
                 className="w-2.5 h-2.5 rounded-full inline-block border border-white"
                 style={{ backgroundColor: selectedSidebarColorHex }}
@@ -463,14 +463,14 @@ export const BrandCustomizerModal: React.FC<BrandCustomizerModalProps> = ({
 
           <button
             onClick={() => setActiveTab('upload')}
-            className={`px-4 py-2.5 text-xs font-bold rounded-t-xl transition cursor-pointer flex items-center gap-2 shrink-0 ${
+            className={`h-full px-3 py-2 text-xs font-bold rounded-xl transition cursor-pointer flex items-center justify-center gap-2 text-center border ${
               activeTab === 'upload'
-                ? 'bg-slate-50 text-[#271a82] border-t-2 border-[#e64519] shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                ? 'bg-slate-50 text-[#271a82] border-[#e64519]/40 border-t-2 border-t-[#e64519] shadow-xs'
+                : 'text-slate-600 border-slate-200/80 hover:text-slate-900 hover:bg-slate-50'
             }`}
           >
-            <Upload className="w-4 h-4 text-[#e64519]" />
-            Cargar Logotipo Propio / URL
+            <Upload className="w-4 h-4 text-[#e64519] shrink-0" />
+            <span>Cargar Logotipo Propio / URL</span>
           </button>
         </div>
 
