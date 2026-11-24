@@ -81,7 +81,8 @@ const RUTAS_PUBLICAS = new Set([
   '/auth/register/resend-verification',
   '/auth/aprobar-por-correo',
   '/auth/recuperar-password/solicitar-codigo',
-  '/auth/recuperar-password/verificar-y-cambiar'
+  '/auth/recuperar-password/verificar-y-cambiar',
+  '/auth/aprobar-recuperacion-password'
 ]);
 
 // Solo administradores: usuarios, configuración del sistema, correo, almacenamiento y notificaciones de seguridad

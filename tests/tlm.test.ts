@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll } from 'bun:test';
+import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import net from 'net';
 import fs from 'fs';
 import os from 'os';
@@ -435,7 +435,16 @@ describe('autenticación', () => {
 
 // ---------- 3. Recuperación de contraseña por correo ----------
 describe('recuperación por correo', () => {
-  test('código por correo: cooldown, verificación con bloqueo y cambio correcto', async () => {
+  beforeEach(() => {
+    process.env.SMTP_USER = 'test-user';
+    process.env.SMTP_PASS = 'test-password';
+  });
+  afterEach(() => {
+    delete process.env.SMTP_USER;
+    delete process.env.SMTP_PASS;
+  });
+
+  test('solicita aprobación antes de enviar el código y permite restablecer la contraseña', async () => {
     const email = 'valentina.castro@tlm.net.co';
     const r = await api('/auth/recuperar-password/solicitar-codigo', { method: 'POST', body: { email } });
     expect(r.status).toBe(200);
@@ -444,7 +453,26 @@ describe('recuperación por correo', () => {
     const again = await api('/auth/recuperar-password/solicitar-codigo', { method: 'POST', body: { email } });
     expect(again.status).toBe(429);
 
+    const correoAprobacion = await esperarCorreo('automatizaciones@tlm.net.co', '/api/v1/auth/aprobar-recuperacion-password?t=');
+    expect(correoAprobacion).toContain('juan.yaya@tlm.net.co');
+    expect(correoAprobacion).not.toMatch(/es: \d{6}/);
+    const token = correoAprobacion.match(/\/api\/v1\/auth\/aprobar-recuperacion-password\?t=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/)?.[1];
+    expect(token).toBeTruthy();
+
+    const revisar = await api(`/auth/aprobar-recuperacion-password?t=${encodeURIComponent(token!)}`);
+    expect(revisar.status).toBe(200);
+    expect(revisar.json).toContain('Confirmar aprobación');
+    const aprobar = await api('/auth/aprobar-recuperacion-password', {
+      method: 'POST',
+      formEncoded: { t: token! }
+    });
+    expect(aprobar.status).toBe(200);
     const codigo = codigoDe(await esperarCorreo(email, 'Expira en 15'));
+    expect((await api('/auth/aprobar-recuperacion-password', {
+      method: 'POST',
+      formEncoded: { t: token! }
+    })).status).toBe(409);
+
     const malo =await api('/auth/recuperar-password/verificar-y-cambiar', { method: 'POST', body: { email, codigo: codigo === '000000' ? '111111' : '000000', nueva_password: 'Recuperada2026', confirmar_password: 'Recuperada2026' } });
     expect(malo.status).toBe(400);
 
@@ -455,16 +483,24 @@ describe('recuperación por correo', () => {
   });
 
   test('cuenta inexistente recibe la misma respuesta y no se envía correo', async () => {
-    const antes = correos.length;
+    const solicitudesAntes = correos.filter(c => decodificar(c).includes('/auth/aprobar-recuperacion-password?t=')).length;
     const r = await api('/auth/recuperar-password/solicitar-codigo', { method: 'POST', body: { email: 'nadie@tlm.net.co' } });
     expect(r.status).toBe(200);
     await new Promise(r => setTimeout(r, 200));
-    expect(correos.length).toBe(antes);
+    const solicitudesDespues = correos.filter(c => decodificar(c).includes('/auth/aprobar-recuperacion-password?t=')).length;
+    expect(solicitudesDespues).toBe(solicitudesAntes);
   });
 
   test('tras 5 códigos incorrectos la verificación queda bloqueada', async () => {
     const email = 'carlos.analista@tlm.net.co';
     await api('/auth/recuperar-password/solicitar-codigo', { method: 'POST', body: { email } });
+    const correoAprobacion = await esperarCorreo('automatizaciones@tlm.net.co', '/api/v1/auth/aprobar-recuperacion-password?t=');
+    const token = correoAprobacion.match(/\/api\/v1\/auth\/aprobar-recuperacion-password\?t=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/)?.[1];
+    expect(token).toBeTruthy();
+    expect((await api('/auth/aprobar-recuperacion-password', {
+      method: 'POST',
+      formEncoded: { t: token! }
+    })).status).toBe(200);
     const codigo = codigoDe(await esperarCorreo(email, 'Expira en 15'));
     const erroneo = codigo === '000000' ? '111111' : '000000';
     for (let i = 0; i < 5; i++) {
@@ -476,7 +512,7 @@ describe('recuperación por correo', () => {
 
   test('los códigos no aparecen en las notificaciones del administrador', async () => {
     const r = await api('/auth/notificaciones-seguridad', { cookie: sesionAdmin });
-    const codigos = correos.map(c => codigoDe(c)).filter(Boolean);
+    const codigos = correos.filter(c => decodificar(c).includes('Expira en 15 minutos')).map(c => codigoDe(c));
     for (const c of codigos) expect(JSON.stringify(r.json)).not.toContain(c);
   });
 });

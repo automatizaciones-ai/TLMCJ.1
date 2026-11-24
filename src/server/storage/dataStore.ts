@@ -653,6 +653,8 @@ export class DataStore {
     tipo: NotificacionSeguridad['tipo'];
     codigo_otp?: string;
     mensaje: string;
+    estado?: NotificacionSeguridad['estado'];
+    enviarCorreo?: boolean;
   }): NotificacionSeguridad {
     const item: NotificacionSeguridad = {
       id: `sec-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -662,14 +664,16 @@ export class DataStore {
       tipo: notif.tipo,
       codigo_otp: notif.codigo_otp,
       mensaje: notif.mensaje,
-      estado: this.alNotificarSeguridad ? 'PENDIENTE' : 'SIMULADO'
+      estado: notif.estado || (this.alNotificarSeguridad && notif.enviarCorreo !== false ? 'PENDIENTE' : 'SIMULADO')
     };
     this.notificacionesSeguridad.unshift(item);
     if (this.notificacionesSeguridad.length > 50) {
       this.notificacionesSeguridad.pop();
     }
     this.saveToDisk();
-    try { this.alNotificarSeguridad?.(item); } catch (err) { console.warn('[Seguridad] No se pudo enviar el correo:', err); }
+    if (notif.enviarCorreo !== false) {
+      try { this.alNotificarSeguridad?.(item); } catch (err) { console.warn('[Seguridad] No se pudo enviar el correo:', err); }
+    }
     return item;
   }
 
