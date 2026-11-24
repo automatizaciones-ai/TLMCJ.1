@@ -157,18 +157,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="pointer-events-none absolute -bottom-24 -left-12 w-96 h-96 rounded-full bg-[#e64519]/15 blur-3xl"></div>
 
         <div className="space-y-2 relative z-10">
-          <div className="flex items-center gap-2">
-            <span className="bg-[#e64519] text-white text-[10px] font-extrabold px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-xs">
-              Sociedad BIC
-            </span>
-            <span className="bg-white/10 text-indigo-100 text-[10px] font-bold px-2 py-0.5 rounded-full border border-white/15">
-              Metodología Ágil TLM
-            </span>
-            <span className="text-xs text-indigo-200 font-medium hidden sm:inline">
-              Periodo Gravable 2026
-            </span>
-          </div>
-
           <div className="flex items-center gap-3">
             <h3 className="text-2xl sm:text-3xl font-black tracking-tight" style={{ fontFamily: "'Catamaran', sans-serif" }}>
               Consola TLM Enterprise
