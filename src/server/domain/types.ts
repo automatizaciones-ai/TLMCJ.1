@@ -14,7 +14,7 @@ export interface NotificacionSeguridad {
   destinatario: string;
   asunto: string;
   fecha: string;
-  tipo: 'NUEVO_USUARIO' | 'RESET_ADMIN' | 'CODIGO_RECUPERACION' | 'PASSWORD_CAMBIADA' | 'ACCESO_CODIGO_DESARROLLADOR' | 'CUENTA_APROBADA';
+  tipo: 'NUEVO_USUARIO' | 'RESET_ADMIN' | 'CODIGO_RECUPERACION' | 'PASSWORD_CAMBIADA' | 'ACCESO_CODIGO_DESARROLLADOR' | 'CUENTA_APROBADA' | 'CUENTA_RECHAZADA';
   codigo_otp?: string;
   mensaje: string;
   /** PENDIENTE mientras sale el correo; SIMULADO si no hay proveedor de correo configurado */

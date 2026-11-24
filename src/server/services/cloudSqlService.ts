@@ -30,7 +30,10 @@ function mapUsuarioRow(r: any): Usuario {
     requiere_cambio_password: r.requiereCambioPassword || false,
     email_verified: r.emailVerified !== false,
     verification_token: r.verificationToken || null,
-    token_expires_at: r.tokenExpiresAt?.toISOString() || null
+    token_expires_at: r.tokenExpiresAt?.toISOString() || null,
+    codigo_recuperacion: r.codigoRecuperacion || null,
+    codigo_recuperacion_expira: r.codigoRecuperacionExpira?.toISOString() || null,
+    intentos_codigo: r.intentosCodigo || 0
   };
 }
 
@@ -165,6 +168,9 @@ export class CloudSqlService {
         verification_token TEXT,
         token_expires_at TIMESTAMP,
         email_verified BOOLEAN DEFAULT TRUE,
+        codigo_recuperacion TEXT,
+        codigo_recuperacion_expira TIMESTAMP,
+        intentos_codigo INTEGER DEFAULT 0,
         created_at TIMESTAMP DEFAULT NOW()
       )`,
       `CREATE TABLE IF NOT EXISTS facturas (
@@ -269,6 +275,9 @@ export class CloudSqlService {
       `ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token TEXT`,
       `ALTER TABLE users ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMP`,
       `ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT TRUE`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS codigo_recuperacion TEXT`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS codigo_recuperacion_expira TIMESTAMP`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS intentos_codigo INTEGER DEFAULT 0`,
       `ALTER TABLE users ALTER COLUMN hashed_password TYPE TEXT`,
       `ALTER TABLE facturas DROP CONSTRAINT IF EXISTS facturas_cufe_hash_key`,
       `CREATE UNIQUE INDEX IF NOT EXISTS facturas_id_empresa_cufe_hash_key ON facturas (id_empresa, cufe_hash)`,
@@ -606,7 +615,10 @@ export class CloudSqlService {
             requiere_cambio_password: r.requiereCambioPassword || false,
             email_verified: r.emailVerified !== false,
             verification_token: r.verificationToken || null,
-            token_expires_at: r.tokenExpiresAt?.toISOString() || null
+            token_expires_at: r.tokenExpiresAt?.toISOString() || null,
+            codigo_recuperacion: r.codigoRecuperacion || null,
+            codigo_recuperacion_expira: r.codigoRecuperacionExpira?.toISOString() || null,
+            intentos_codigo: r.intentosCodigo || 0
           });
         }
       }
@@ -635,7 +647,10 @@ export class CloudSqlService {
         requiere_cambio_password: r.requiereCambioPassword || false,
         email_verified: r.emailVerified !== false,
         verification_token: r.verificationToken || null,
-        token_expires_at: r.tokenExpiresAt?.toISOString() || null
+        token_expires_at: r.tokenExpiresAt?.toISOString() || null,
+        codigo_recuperacion: r.codigoRecuperacion || null,
+        codigo_recuperacion_expira: r.codigoRecuperacionExpira?.toISOString() || null,
+        intentos_codigo: r.intentosCodigo || 0
       };
     } catch (error) {
       console.error('[CloudSQL] Error getUsuarioById:', error);
@@ -662,7 +677,10 @@ export class CloudSqlService {
         requiere_cambio_password: match.requiereCambioPassword || false,
         email_verified: match.emailVerified !== false,
         verification_token: match.verificationToken || null,
-        token_expires_at: match.tokenExpiresAt?.toISOString() || null
+        token_expires_at: match.tokenExpiresAt?.toISOString() || null,
+        codigo_recuperacion: match.codigoRecuperacion || null,
+        codigo_recuperacion_expira: match.codigoRecuperacionExpira?.toISOString() || null,
+        intentos_codigo: match.intentosCodigo || 0
       };
     } catch (error) {
       console.error('[CloudSQL] Error getUsuarioByEmail:', error);
@@ -803,6 +821,9 @@ export class CloudSqlService {
       if (data.email_verified !== undefined) updatePayload.emailVerified = data.email_verified;
       if (data.verification_token !== undefined) updatePayload.verificationToken = data.verification_token;
       if (data.token_expires_at !== undefined) updatePayload.tokenExpiresAt = data.token_expires_at ? new Date(data.token_expires_at) : null;
+      if (data.codigo_recuperacion !== undefined) updatePayload.codigoRecuperacion = data.codigo_recuperacion;
+      if (data.codigo_recuperacion_expira !== undefined) updatePayload.codigoRecuperacionExpira = data.codigo_recuperacion_expira ? new Date(data.codigo_recuperacion_expira) : null;
+      if (data.intentos_codigo !== undefined) updatePayload.intentosCodigo = data.intentos_codigo;
 
       const updated = await drizzleDb.update(schema.users)
         .set(updatePayload)
@@ -1029,6 +1050,40 @@ export class CloudSqlService {
     }
 
     return results.filter((factura): factura is Factura => factura !== undefined);
+  }
+
+  public static async bulkCreateFacturasDetallado(
+    facturas: Partial<Factura>[],
+    concurrencia = 5
+  ): Promise<{ creadas: Factura[]; fallidas: { factura_num: string; error: string }[] }> {
+    const creadas: Factura[] = [];
+    const fallidas: { factura_num: string; error: string }[] = [];
+    let siguiente = 0;
+    const trabajador = async () => {
+      while (siguiente < facturas.length) {
+        const indice = siguiente++;
+        const factura = facturas[indice];
+        let ultimoError = '';
+        for (let intento = 0; intento < 3; intento++) {
+          try {
+            creadas.push(await this.createFactura(factura));
+            ultimoError = '';
+            break;
+          } catch (err: any) {
+            ultimoError = String(err?.message || err);
+            if (intento < 2) await new Promise(resolve => setTimeout(resolve, 300 * (intento + 1)));
+          }
+        }
+        if (ultimoError) {
+          fallidas.push({
+            factura_num: factura.factura_num || '(sin número)',
+            error: ultimoError.substring(0, 200)
+          });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrencia, facturas.length) }, trabajador));
+    return { creadas, fallidas };
   }
 
   public static async createFactura(data: Partial<Factura>): Promise<Factura> {

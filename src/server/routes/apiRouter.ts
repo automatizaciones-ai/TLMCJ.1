@@ -25,6 +25,7 @@ import { startSession, endSession, getSessionUser } from '../services/sessionAut
 import { mailer } from '../services/mailer.ts';
 import { secondsLocked, recordFailure, lockFor, clearAttempts } from '../services/attemptLimiter.ts';
 import { crearTokenAprobacion, huellaCorreo, verificarTokenAprobacion, type AccionAprobacion } from '../services/aprobacionToken.ts';
+import { crearTokenAprobacionRecuperacion, verificarTokenAprobacionRecuperacion, VIGENCIA_SOLICITUD_RECUPERACION_MS } from '../services/recuperacionAprobacionToken.ts';
 
 const router = Router();
 router.use(express.urlencoded({ extended: false, limit: '10kb' }));
@@ -228,10 +229,14 @@ async function rechazarRegistro(id: number): Promise<Usuario | null> {
 }
 
 /** Guarda la contraseña (siempre cifrada) en Cloud SQL y en el almacenamiento local. */
-async function guardarClave(user: any, hash: string, extra: Record<string, unknown> = {}) {
-  await CloudSqlService.updateUsuario(user.id_usuario, { hashed_password: hash, ...extra } as any).catch(() => null);
+async function guardarClave(user: any, hash: string | undefined, extra: Record<string, unknown> = {}) {
+  const cambios = { ...(hash !== undefined ? { hashed_password: hash } : {}), ...extra };
+  if (await CloudSqlService.isCloudSqlOnline()) {
+    const updated = await CloudSqlService.updateUsuario(user.id_usuario, cambios as any);
+    if (!updated) throw new Error('No se pudo guardar la actualización de seguridad del usuario.');
+  }
   const local = db.usuarios.find(u => u.id_usuario === user.id_usuario);
-  if (local) Object.assign(local, { hashed_password: hash, ...extra });
+  if (local) Object.assign(local, cambios);
   db.saveToDisk();
 }
 
@@ -446,12 +451,14 @@ router.post('/auth/usuarios/:id/reset-password-admin', async (req: Request, res:
   });
 });
 
-// Código de recuperación por correo. La respuesta es igual exista o no la cuenta.
+const APROBADORES_RECUPERACION = ['automatizaciones@tlm.net.co', 'juan.yaya@tlm.net.co'];
+
+// La solicitud primero requiere autorización de un administrador. El código OTP solo se envía al usuario después.
 router.post('/auth/recuperar-password/solicitar-codigo', async (req: Request, res: Response) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ detail: 'Ingresa tu correo electrónico corporativo.' });
-  if (!mailer.enabled) {
-    return res.status(503).json({ detail: 'El envío de códigos por correo no está configurado. Pide al administrador que defina SMTP_HOST en el servidor.' });
+  if (!CorreoService.estado().configurado) {
+    return res.status(503).json({ detail: 'El servicio de correo no está configurado. Pide al administrador que configure el proveedor de correo.' });
   }
   const correo = String(email).toLowerCase().trim();
   const claveCodigo = `codigo:${correo}`;
@@ -464,33 +471,141 @@ router.post('/auth/recuperar-password/solicitar-codigo', async (req: Request, re
 
   const respuestaGenerica = {
     ok: true,
-    mensaje: 'Si el correo está registrado, recibirás un código de seguridad de 6 dígitos en los próximos minutos.',
+    mensaje: 'Si el correo está registrado, se enviará una solicitud de aprobación. Después de aprobarla recibirás un código de seguridad.',
     expira_en_minutos: 15
   };
   const user: any = await buscarUsuarioPorCorreo(correo);
   if (!user || !user.activo) return res.json(respuestaGenerica);
 
-  const codigoOtp = crypto.randomInt(100000, 1000000).toString();
+  let baseUrl: string;
   try {
-    await mailer.send(user.email, 'Código de seguridad - Consola TLM',
-      `Hola ${user.nombre_completo},\n\nTu código de seguridad para restablecer la contraseña es: ${codigoOtp}\n\nExpira en 15 minutos. Si tú no lo solicitaste, ignora este correo y avisa a Juan Yaya (automatizaciones@tlm.net.co).`);
-  } catch (e) {
-    console.warn('[Correo] No se pudo enviar el código de recuperación:', e);
-    return res.status(502).json({ detail: 'No pudimos enviar el correo con el código. Intenta más tarde.' });
+    baseUrl = baseUrlAplicacion();
+  } catch (error) {
+    console.error('[Recuperación] No se pudo obtener la URL pública:', error);
+    return res.status(503).json({ detail: 'El servidor no tiene una URL pública válida para solicitar la aprobación.' });
   }
-  // Solo se guarda el hash del código y se cuentan los intentos fallidos
+
+  const token = crearTokenAprobacionRecuperacion(user.id_usuario, user.email);
+  const expiraSolicitud = new Date(Date.now() + VIGENCIA_SOLICITUD_RECUPERACION_MS).toISOString();
   await guardarClave(user, user.hashed_password, {
-    codigo_recuperacion: hashCodigo(codigoOtp),
-    codigo_recuperacion_expira: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    codigo_recuperacion: hashCodigo(token),
+    codigo_recuperacion_expira: expiraSolicitud,
     intentos_codigo: 0
   });
+
+  const aprobarUrl = `${baseUrl}/api/v1/auth/aprobar-recuperacion-password?t=${encodeURIComponent(token)}`;
+  try {
+    const resultado = await CorreoService.enviar({
+      para: APROBADORES_RECUPERACION,
+      asunto: `Aprobación requerida: recuperación de contraseña de ${user.nombre_completo}`,
+      texto: `Se solicitó restablecer la contraseña de ${user.nombre_completo} (${user.email}).\n\nPara aprobar y enviar el código al usuario, abre:\n${aprobarUrl}\n\nEl enlace vence en 60 minutos. Si no reconoces la solicitud, ignora este correo.`,
+      html: `<p>Se solicitó restablecer la contraseña de <b>${escaparHtml(user.nombre_completo)}</b> (${escaparHtml(user.email)}).</p><p><a href="${escaparHtml(aprobarUrl)}" style="display:inline-block;background:#16a34a;color:#fff;text-decoration:none;padding:10px 18px;border-radius:8px;font-weight:bold">Revisar y aprobar</a></p><p>Al aprobar, el código de seguridad se enviará exclusivamente al usuario. El enlace vence en 60 minutos. Si no reconoces la solicitud, ignora este correo.</p>`,
+      evento: 'SEGURIDAD'
+    });
+    if (!resultado.ok || resultado.simulado) {
+      throw new Error(resultado.error || 'El correo de aprobación no pudo enviarse.');
+    }
+  } catch (e) {
+    console.warn('[Correo] No se pudo enviar la solicitud de aprobación de recuperación:', e);
+    await guardarClave(user, user.hashed_password, {
+      codigo_recuperacion: null,
+      codigo_recuperacion_expira: null,
+      intentos_codigo: 0
+    });
+    return res.status(502).json({ detail: 'No pudimos enviar la solicitud de aprobación. Intenta más tarde.' });
+  }
+  res.json(respuestaGenerica);
+});
+
+router.get('/auth/aprobar-recuperacion-password', async (req: Request, res: Response) => {
+  const token = typeof req.query.t === 'string' ? req.query.t : '';
+  const solicitud = verificarTokenAprobacionRecuperacion(token);
+  if (!solicitud) {
+    return res.status(400).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>El enlace no es válido o ya venció.</p>'));
+  }
+
+  let user: Usuario | null;
+  try {
+    user = await usuarioPorIdRegistro(solicitud.idUsuario);
+  } catch (error) {
+    console.error('[Recuperación] No se pudo consultar la solicitud:', error);
+    return res.status(503).type('html').send(paginaAprobacion('No se pudo consultar', '<p>Intenta de nuevo más tarde.</p>'));
+  }
+  if (
+    !user ||
+    !user.activo ||
+    huellaCorreo(user.email) !== solicitud.huella ||
+    user.codigo_recuperacion !== hashCodigo(token) ||
+    !user.codigo_recuperacion_expira ||
+    new Date(user.codigo_recuperacion_expira).getTime() <= Date.now()
+  ) {
+    return res.status(409).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>La solicitud ya fue procesada o venció.</p>'));
+  }
+
+  res.type('html').send(paginaAprobacion(
+    'Aprobar recuperación de contraseña',
+    `<p>Solicitante: <b>${escaparHtml(user.nombre_completo)}</b><br>Cuenta: ${escaparHtml(user.email)}</p><p>Al confirmar, se enviará un código de seguridad al correo del usuario. La contraseña no se cambia hasta que el usuario ingrese ese código y defina una nueva.</p><form method="post" action="/api/v1/auth/aprobar-recuperacion-password"><input type="hidden" name="t" value="${escaparHtml(token)}"><button type="submit" style="background:#16a34a;color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:bold;cursor:pointer">Confirmar aprobación</button></form>`
+  ));
+});
+
+router.post('/auth/aprobar-recuperacion-password', async (req: Request, res: Response) => {
+  const token = typeof req.body?.t === 'string' ? req.body.t : '';
+  const solicitud = verificarTokenAprobacionRecuperacion(token);
+  if (!solicitud) {
+    return res.status(400).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>El enlace no es válido o ya venció.</p>'));
+  }
+
+  let user: Usuario | null;
+  try {
+    user = await usuarioPorIdRegistro(solicitud.idUsuario);
+  } catch (error) {
+    console.error('[Recuperación] No se pudo consultar la solicitud:', error);
+    return res.status(503).type('html').send(paginaAprobacion('No se pudo completar', '<p>Intenta de nuevo más tarde.</p>'));
+  }
+  if (
+    !user ||
+    !user.activo ||
+    huellaCorreo(user.email) !== solicitud.huella ||
+    user.codigo_recuperacion !== hashCodigo(token) ||
+    !user.codigo_recuperacion_expira ||
+    new Date(user.codigo_recuperacion_expira).getTime() <= Date.now()
+  ) {
+    return res.status(409).type('html').send(paginaAprobacion('Solicitud no disponible', '<p>La solicitud ya fue procesada o venció.</p>'));
+  }
+
+  const codigoOtp = crypto.randomInt(100000, 1000000).toString();
+  const resultado = await CorreoService.enviar({
+    para: [user.email],
+    asunto: 'Código de seguridad - Consola TLM',
+    texto: `Hola ${user.nombre_completo},\n\nSe aprobó tu solicitud de recuperación de contraseña. Tu código de seguridad es: ${codigoOtp}\n\nExpira en 15 minutos. Si no solicitaste este código, contacta a automatizaciones@tlm.net.co.`,
+    html: `<p>Hola ${escaparHtml(user.nombre_completo)},</p><p>Se aprobó tu solicitud de recuperación de contraseña. Tu código de seguridad es:</p><p style="font-size:26px;font-weight:bold;letter-spacing:6px;color:#271a82">${codigoOtp}</p><p>Expira en 15 minutos. Si no solicitaste este código, contacta a automatizaciones@tlm.net.co.</p>`,
+    evento: 'SEGURIDAD'
+  });
+  if (!resultado.ok || resultado.simulado) {
+    console.warn('[Correo] No se pudo enviar el código de recuperación:', resultado.error);
+    return res.status(502).type('html').send(paginaAprobacion('No se pudo enviar el código', '<p>No se pudo enviar el código al usuario. Intenta aprobar de nuevo más tarde.</p>'));
+  }
+
+  try {
+    await guardarClave(user, user.hashed_password, {
+      codigo_recuperacion: hashCodigo(codigoOtp),
+      codigo_recuperacion_expira: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      intentos_codigo: 0
+    });
+  } catch (error) {
+    console.error('[Recuperación] No se pudo guardar el código enviado:', error);
+    return res.status(503).type('html').send(paginaAprobacion('No se pudo completar', '<p>No se pudo activar el código. Solicita otra recuperación más tarde.</p>'));
+  }
+
   db.addNotificacionSeguridad({
     destinatario: user.email,
-    asunto: 'Solicitud de recuperación de contraseña - TLM',
+    asunto: 'Código de seguridad para recuperación - TLM',
     tipo: 'CODIGO_RECUPERACION',
-    mensaje: `Se envió un código de recuperación al correo de ${user.nombre_completo}. El código no se muestra en esta consola.`
+    mensaje: 'Se envió un código de recuperación al correo del usuario después de la aprobación. El código no se muestra en esta consola.',
+    estado: 'ENVIADO',
+    enviarCorreo: false
   });
-  res.json(respuestaGenerica);
+  return res.type('html').send(paginaAprobacion('Recuperación aprobada', `<p>Se envió el código de seguridad a <b>${escaparHtml(user.email)}</b>. El usuario puede usarlo para crear una nueva contraseña durante los próximos 15 minutos.</p>`));
 });
 
 router.post('/auth/recuperar-password/verificar-y-cambiar', async (req: Request, res: Response) => {
@@ -1888,6 +2003,7 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
   res.once('close', limpiarSubidas);
   const parsedFacturas: Partial<Factura>[] = [];
   let archivosXmlExtraidos = 0;
+  const archivosSinFacturas: string[] = [];
 
   // NIT de la empresa activa: decide si cada documento es VENTA (emitido por ella) o COMPRA (recibido)
   const empresasEnLinea = await CloudSqlService.getEmpresas().catch(() => []);
@@ -1982,6 +2098,9 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
       errorLectura = err instanceof Error ? err.message : String(err);
       console.error(`[Upload] No se pudo leer "${file.originalname}":`, err);
     }
+    if (!esPdf && parsedList.length === 0 && !errorLectura) {
+      archivosSinFacturas.push(file.originalname);
+    }
     if (!errorLectura && !esPdf && parsedList.length === 0 && !erroresArchivo.length) {
       errorLectura = 'No se encontró una factura, nota crédito o nota débito UBL válida en el XML/ZIP.';
     }
@@ -2050,15 +2169,28 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
     }));
   }
 
+  const ultimaPorClave = new Map<string, Partial<Factura>>();
+  for (const factura of parsedFacturas) {
+    if (factura.cufe_hash) ultimaPorClave.set(`${factura.id_empresa}|${factura.cufe_hash}`, factura);
+  }
+  const unicasEnLote = parsedFacturas.filter(factura =>
+    !factura.cufe_hash || ultimaPorClave.get(`${factura.id_empresa}|${factura.cufe_hash}`) === factura
+  );
+  const repetidasEnLote = parsedFacturas.length - unicasEnLote.length;
+
   let processedFacturas: Factura[] = [];
+  let fallidas: { factura_num: string; error: string }[] = [];
   try {
-    processedFacturas = await CloudSqlService.bulkCreateFacturas(parsedFacturas);
+    const resultado = await CloudSqlService.bulkCreateFacturasDetallado(unicasEnLote);
+    processedFacturas = resultado.creadas;
+    fallidas = resultado.fallidas;
   } catch (e) {
     console.warn('[CloudSQL] Neon no disponible al guardar facturas subidas:', e);
   }
 
-  if (processedFacturas.length === 0 && parsedFacturas.length > 0) {
-    processedFacturas = parsedFacturas.map((factura, index) => ({
+  if (processedFacturas.length === 0 && unicasEnLote.length > 0) {
+    fallidas = [];
+    processedFacturas = unicasEnLote.map((factura, index) => ({
       ...factura,
       id_factura: Date.now() + index,
       id_empresa: factura.id_empresa || idEmpresa,
@@ -2083,12 +2215,6 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
       estado_revision: factura.estado_revision || 'PENDIENTE',
       fecha_cargue: factura.fecha_cargue || new Date().toISOString()
     } as Factura));
-  }
-
-  if (processedFacturas.length > 0 && processedFacturas.length < parsedFacturas.length) {
-    return res.status(503).json({
-      detail: `La base de datos solo guardó ${processedFacturas.length} de ${parsedFacturas.length} documentos. Se reintentará el lote en grupos más pequeños.`
-    });
   }
 
   const duplicadasCount = processedFacturas.filter((f: any) => f._duplicada).length;
@@ -2118,8 +2244,12 @@ router.post('/facturas/upload', uploadFacturas.array('archivos'), async (req: Re
     archivos_procesados: files.length,
     xmls_extraidos: archivosXmlExtraidos,
     facturas_creadas: processedFacturas.length,
-    facturas_duplicadas: duplicadasCount,
+    facturas_leidas: parsedFacturas.length,
+    facturas_duplicadas: duplicadasCount + repetidasEnLote,
+    repetidas_en_lote: repetidasEnLote,
     facturas_nuevas: processedFacturas.length - duplicadasCount,
+    fallidas,
+    archivos_sin_facturas: archivosSinFacturas,
     ventas_nuevas: facturasNuevas.filter(f => f.tipo_operacion === 'VENTA').length,
     compras_nuevas: facturasNuevas.filter(f => f.tipo_operacion !== 'VENTA').length,
     pdfs_originales: pdfsOriginales,

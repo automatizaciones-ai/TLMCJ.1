@@ -49,7 +49,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [recoveryEmail, setRecoveryEmail] = useState('');
   const [recoveryStep, setRecoveryStep] = useState<1 | 2>(1);
   const [recoveryCode, setRecoveryCode] = useState('');
-  const [simulatedOtpCode, setSimulatedOtpCode] = useState<string | null>(null);
   const [recoveryNuevaPassword, setRecoveryNuevaPassword] = useState('');
   const [recoveryConfirmarPassword, setRecoveryConfirmarPassword] = useState('');
 
@@ -315,8 +314,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         throw new Error(data.detail || 'Error al solicitar código.');
       }
 
-      setSimulatedOtpCode(data.codigo_simulado || null);
-      setRecoveryCode(data.codigo_simulado || '');
+      setRecoveryCode('');
       setRecoveryStep(2);
       onShowToast(data.mensaje || `Código enviado al correo ${recoveryEmail.trim()}.`);
     } catch (err: any) {
@@ -924,7 +922,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <div>
                   <h4 className="text-xs font-bold text-indigo-950">Recuperación Segura por Correo Corporativo</h4>
                   <p className="text-[11px] text-indigo-800">
-                    Generación de código OTP de 6 dígitos enviado directamente a tu correo corporativo.
+                    Un administrador debe aprobar la solicitud antes de que se envíe el código a tu correo.
                   </p>
                 </div>
               </div>
@@ -951,7 +949,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                   <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-600 flex items-center gap-2">
                     <Clock className="w-4 h-4 text-[#fa9d1c] shrink-0" />
-                    <span>El código de seguridad generado tendrá una validez de 15 minutos para mayor protección.</span>
+                    <span>Después de la aprobación, el código de seguridad llegará a tu correo y tendrá una validez de 15 minutos.</span>
                   </div>
 
                   <div className="flex items-center gap-2 pt-1">
@@ -968,7 +966,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       className="flex-1 py-2.5 rounded-xl bg-[#271a82] hover:bg-[#1c1343] text-white font-bold text-xs shadow-md transition active:scale-95 cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
                     >
                       <Send className="w-3.5 h-3.5 text-[#fa9d1c]" />
-                      {isLoading ? 'Generando código...' : 'Generar & Enviar Código al Correo'}
+                      {isLoading ? 'Enviando solicitud...' : 'Solicitar aprobación'}
                     </button>
                   </div>
                 </form>
@@ -977,36 +975,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {/* PASO 2: VERIFICAR CÓDIGO & ESTABLECER NUEVA CONTRASEÑA */}
               {recoveryStep === 2 && (
                 <form onSubmit={handleVerifyOtpAndReset} className="space-y-4">
-                  {!simulatedOtpCode && (
-                    <div className="p-3.5 bg-indigo-50 border border-indigo-200 rounded-2xl flex items-start gap-3 text-xs text-indigo-950">
-                      <Mail className="w-4 h-4 mt-0.5 text-indigo-700 shrink-0" />
-                      <span>Enviamos un código de 6 dígitos a <b>{recoveryEmail}</b>. Es válido por 15 minutos; si no lo ve, revise la carpeta de spam.</span>
-                    </div>
-                  )}
-                  {/* Modo demostración (sin servidor de correo): el código se muestra en pantalla */}
-                  {simulatedOtpCode && (
-                    <div className="p-3.5 bg-emerald-50 border border-emerald-300 rounded-2xl flex items-start gap-3">
-                      <div className="p-1.5 bg-emerald-600 text-white rounded-lg shrink-0 mt-0.5">
-                        <Mail className="w-4 h-4" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[11px] font-bold text-emerald-950 uppercase tracking-wide">
-                          Correo Corporativo Entregado a: {recoveryEmail}
-                        </div>
-                        <div className="text-xs text-emerald-900 mt-0.5">
-                          Tu código de seguridad confidencial TLM es:
-                        </div>
-                        <div className="mt-1.5 flex items-center gap-2">
-                          <span className="font-mono text-base font-black tracking-widest bg-white border border-emerald-300 text-emerald-800 px-3 py-1 rounded-lg shadow-2xs">
-                            {simulatedOtpCode}
-                          </span>
-                          <span className="text-[10px] text-emerald-700 bg-emerald-100/80 px-2 py-0.5 rounded font-medium">
-                            Válido por 15 min
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  <div className="p-3.5 bg-indigo-50 border border-indigo-200 rounded-2xl flex items-start gap-3 text-xs text-indigo-950">
+                    <Mail className="w-4 h-4 mt-0.5 text-indigo-700 shrink-0" />
+                    <span>La solicitud se envió a los administradores. Cuando uno la apruebe, recibirás un código de 6 dígitos en <b>{recoveryEmail}</b>. Revisa también la carpeta de spam.</span>
+                  </div>
 
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
