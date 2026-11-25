@@ -154,15 +154,14 @@ export class ExcelService {
       "ROL": u.rol,
       "ESTADO": u.activo ? 'ACTIVO' : 'INACTIVO',
       "EMPRESAS ASIGNADAS (IDS)": (u.empresas_ids || []).join(', '),
-      "ADMINISTRADOR": u.permisos.administrador ? 'SÍ' : 'NO',
-      "AUDITORIA UBL": u.permisos.auditoria_ubl ? 'SÍ' : 'NO',
-      "IMPUESTOS F350": u.permisos.impuestos_f350 ? 'SÍ' : 'NO',
-      "CONCILIACION BANCARIA": u.permisos.conciliacion_bancaria ? 'SÍ' : 'NO',
-      "TRANSMITIR SIIGO": u.permisos.transmitir_siigo ? 'SÍ' : 'NO',
-      "GESTION USUARIOS": u.permisos.gestion_usuarios ? 'SÍ' : 'NO',
-      "BASE DE DATOS": u.permisos.base_datos ? 'SÍ' : 'NO',
-      "ARQUITECTURA ESCALA": u.permisos.arquitectura_escala ? 'SÍ' : 'NO'
-    }));
+    ""ADMINISTRADOR": u.permisos?.administrador ? 'SÍ' : 'NO',
+      "AUDITORIA UBL": u.permisos?.auditoria_ubl ? 'SÍ' : 'NO',
+      "IMPUESTOS F350": u.permisos?.impuestos_f350 ? 'SÍ' : 'NO',
+      "CONCILIACION BANCARIA": u.permisos?.conciliacion_bancaria ? 'SÍ' : 'NO',
+      "TRANSMITIR SIIGO": u.permisos?.transmitir_siigo ? 'SÍ' : 'NO',
+      "GESTION USUARIOS": u.permisos?.gestion_usuarios ? 'SÍ' : 'NO',
+      "BASE DE DATOS": u.permisos?.base_datos ? 'SÍ' : 'NO',
+      "ARQUITECTURA ESCALA": u.permisos?.arquitectura_escala ? 'SÍ' : 'NO'
     const wsUsuarios = XLSX.utils.json_to_sheet(usuariosRows);
     wsUsuarios['!cols'] = [
       { wch: 12 }, { wch: 28 }, { wch: 30 }, { wch: 16 }, { wch: 12 },
@@ -180,12 +179,11 @@ export class ExcelService {
       "ESTADO": d.estado,
       "TOKEN ACCESO": d.token_desarrollador,
       "EDITAR CÓDIGO": d.permisos_codigo.editar_codigo ? 'SÍ' : 'NO',
-      "COMMITS GIT": d.permisos_codigo.hacer_commits_git ? 'SÍ' : 'NO',
-      "CLOUD RUN DEPLOY": d.permisos_codigo.desplegar_cloud_run ? 'SÍ' : 'NO',
-      "DRIVE SYNC": d.permisos_codigo.acceso_google_drive ? 'SÍ' : 'NO',
-      "APIS DIAN": d.permisos_codigo.gestionar_apis_dian ? 'SÍ' : 'NO',
-      "FECHA INVITACIÓN": d.fecha_invitacion,
-      "INVITADO POR": d.invitado_por
+     "EDITAR CÓDIGO": d.permisos_codigo?.editar_codigo ? 'SÍ' : 'NO',
+      "COMMITS GIT": d.permisos_codigo?.hacer_commits_git ? 'SÍ' : 'NO',
+      "CLOUD RUN DEPLOY": d.permisos_codigo?.desplegar_cloud_run ? 'SÍ' : 'NO',
+      "DRIVE SYNC": d.permisos_codigo?.acceso_google_drive ? 'SÍ' : 'NO',
+      "APIS DIAN": d.permisos_codigo?.gestionar_apis_dian ? 'SÍ' : 'NO',
     }));
     const wsDevs = XLSX.utils.json_to_sheet(devsRows);
     wsDevs['!cols'] = [
